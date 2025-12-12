@@ -11,7 +11,6 @@ namespace helix::engine {
 class EventBus {
   public:
     explicit EventBus(std::size_t capacity = 1024);
-
     bool publish(const Event &event);
     std::optional<Event> poll();
     std::size_t capacity() const;
