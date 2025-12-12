@@ -1,0 +1,10 @@
+engine:
+  bus_capacity: 1024
+  replay_file: data/replay/synthetic.csv
+  decision_threshold: 0.01
+  risk:
+    max_position: 5
+    max_notional: 250000
+  transports:
+    zmq_feature: tcp://*:7001
+    grpc_action: 0.0.0.0:50051

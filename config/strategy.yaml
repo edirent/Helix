@@ -1,0 +1,7 @@
+strategy:
+  name: microtrend
+  threshold: 0.01
+  max_size: 1.5
+  transports:
+    zmq_feature: tcp://localhost:7001
+    grpc_action: 0.0.0.0:50051

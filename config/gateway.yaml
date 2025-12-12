@@ -1,0 +1,9 @@
+gateway:
+  symbols:
+    - BTCUSDT
+  publish_endpoint: tcp://*:6001
+  venues:
+    - name: BYBIT
+      ws_public: wss://stream.bybit.com
+    - name: BINANCE
+      ws_public: wss://stream.binance.com
