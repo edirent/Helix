@@ -1,0 +1,2 @@
+/usr/bin/ar qc libhelix_engine.a CMakeFiles/helix_engine.dir/src/event_bus.cpp.o CMakeFiles/helix_engine.dir/src/tick_replay.cpp.o CMakeFiles/helix_engine.dir/src/feature_engine.cpp.o CMakeFiles/helix_engine.dir/src/decision_engine.cpp.o CMakeFiles/helix_engine.dir/src/risk_engine.cpp.o CMakeFiles/helix_engine.dir/src/matching_engine.cpp.o CMakeFiles/helix_engine.dir/src/recorder.cpp.o CMakeFiles/helix_engine.dir/src/transport_servers.cpp.o
+/usr/bin/ranlib libhelix_engine.a

@@ -1,0 +1,49 @@
+Start testing: Dec 14 02:29 +04
+----------------------------------------------------------
+1/3 Testing: test_replay
+1/3 Test: test_replay
+Command: "/home/edirent/Helix/cpp_engine/build/test_replay"
+Directory: /home/edirent/Helix/cpp_engine/build
+"test_replay" start time: Dec 14 02:29 +04
+Output:
+----------------------------------------------------------
+[2025-12-14 02:29:50][WARN] TickReplay falling back to synthetic feed; file empty or unreadable: data/replay/synthetic.csv
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_replay" end time: Dec 14 02:29 +04
+"test_replay" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/3 Testing: test_match
+2/3 Test: test_match
+Command: "/home/edirent/Helix/cpp_engine/build/test_match"
+Directory: /home/edirent/Helix/cpp_engine/build
+"test_match" start time: Dec 14 02:29 +04
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_match" end time: Dec 14 02:29 +04
+"test_match" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/3 Testing: test_features
+3/3 Test: test_features
+Command: "/home/edirent/Helix/cpp_engine/build/test_features"
+Directory: /home/edirent/Helix/cpp_engine/build
+"test_features" start time: Dec 14 02:29 +04
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_features" end time: Dec 14 02:29 +04
+"test_features" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Dec 14 02:29 +04

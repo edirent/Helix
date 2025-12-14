@@ -14,10 +14,15 @@
 
 using namespace helix;
 
-int main() {
+int main(int argc, char **argv) {
+    std::string replay_source = "data/replay/synthetic.csv";
+    if (argc > 1) {
+        replay_source = argv[1];
+    }
+
     engine::EventBus bus(64);
     engine::TickReplay replay;
-    replay.load_file("data/replay/synthetic.csv");
+    replay.load_file(replay_source);
 
     engine::FeatureEngine feature_engine;
     engine::DecisionEngine decision_engine;

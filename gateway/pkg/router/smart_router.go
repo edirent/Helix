@@ -1,6 +1,10 @@
 package router
 
-import "math"
+import (
+	"math"
+
+	"github.com/helix-lab/helix/gateway/pkg/transport"
+)
 
 type BookView struct {
 	BestBid float64
@@ -16,7 +20,7 @@ func NewSmartRouter(fees FeeModel) *SmartRouter {
 }
 
 // Route selects the venue with the best adjusted price for the desired side.
-func (r *SmartRouter) Route(action interface{ Side string }, books map[string]BookView) string {
+func (r *SmartRouter) Route(action transport.Action, books map[string]BookView) string {
 	if len(books) == 0 {
 		return "SIM"
 	}

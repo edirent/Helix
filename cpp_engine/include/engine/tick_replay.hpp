@@ -21,6 +21,7 @@ class TickReplay {
 
   private:
     void seed_synthetic_data();
+    bool load_csv_from(const std::filesystem::path &path);
 
     std::filesystem::path source_;
     std::vector<OrderbookSnapshot> snapshots_;
