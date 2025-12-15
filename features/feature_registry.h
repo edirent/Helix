@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include "feature_base.h"
 #include <mutex>
+#include <functional>
 #include <vector>
 #include <utility>
 #include <stdexcept>
