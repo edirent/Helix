@@ -20,7 +20,7 @@ struct BookTopEvent
 class IFeature{
 public:
     virtual ~IFeature() = default;
-    virtural void update(const BookTopEvent &event) = 0;
+    virtual void update(const BookTopEvent &event) = 0;
     virtual void reset() = 0;
     virtual bool ready() const = 0;
     virtual double value() const = 0;
