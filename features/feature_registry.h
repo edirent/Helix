@@ -27,14 +27,18 @@ public:
         }
         factories_[name] = std::move(factory);
     }
+
     std::unique_ptr<IFeature> create(const std::string& name, const ParamList& params) {
+      FeatureFactory f;
+      {
         std::lock_guard<std::mutex> g(mu_);
         auto it = factories_.find(name);
-        if (it == factories_.end()) {
-            throw std::runtime_error("Feature not found: " + name);
-        }
-        return it->second(params);
+        if (it == factories_.end()) throw std::runtime_error("Feature not found: " + name);
+        f = it->second; // copy callable
+      }
+      return f(params); // out of lock
     }
+
 private:
     mutable std::mutex mu_;
     std::unordered_map<std::string, FeatureFactory> factories_;
