@@ -15,18 +15,28 @@ namespace feat {
 inline std::string json_escape(std::string_view s) {
   std::string out;
   out.reserve(s.size() + 8);
-  for (char c : s) {
+  for (unsigned char c : s) {
     switch (c) {
       case '\\': out += "\\\\"; break;
       case '"':  out += "\\\""; break;
+      case '\b': out += "\\b";  break;
+      case '\f': out += "\\f";  break;
       case '\n': out += "\\n";  break;
       case '\r': out += "\\r";  break;
       case '\t': out += "\\t";  break;
-      default:   out += c;      break;
+      default:
+        if (c < 0x20) { // other control chars
+          char buf[7];
+          std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+          out += buf;
+        } else {
+          out += static_cast<char>(c);
+        }
     }
   }
   return out;
 }
+
 
 inline uint64_t fnv1a64(std::string_view data) {
   constexpr uint64_t FNV_OFFSET = 14695981039346656037ULL; // correct
