@@ -32,11 +32,47 @@ struct Action {
     double size{0.0};
 };
 
+enum class FillStatus : uint8_t { Filled, Rejected };
+
+enum class RejectReason : uint8_t {
+    None = 0,
+    BadSide,
+    ZeroQty,
+    NoBid,
+    NoAsk,
+    NoLiquidity,
+};
+
 struct Fill {
+    FillStatus status{FillStatus::Rejected};
+    RejectReason reason{RejectReason::None};
+
     double price{0.0};
     double qty{0.0};
     bool partial{false};
     Side side{Side::Hold};
+
+    static Fill filled(Side s, double px, double q, bool part=false) {
+        Fill f;
+        f.status = FillStatus::Filled;
+        f.reason = RejectReason::None;
+        f.side = s;
+        f.price = px;
+        f.qty = q;
+        f.partial = part;
+        return f;
+    }
+
+    static Fill rejected(Side s, RejectReason r) {
+        Fill f;
+        f.status = FillStatus::Rejected;
+        f.reason = r;
+        f.side = s;
+        f.price = 0.0;
+        f.qty = 0.0;
+        f.partial = false;
+        return f;
+    }
 };
 
 struct Position {
