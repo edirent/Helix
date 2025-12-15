@@ -153,6 +153,19 @@ helix_engine_main/fast:
 .PHONY : helix_engine_main/fast
 
 #=============================================================================
+# Target rules for targets named feature_dump
+
+# Build rule for target.
+feature_dump: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 feature_dump
+.PHONY : feature_dump
+
+# fast build rule for target.
+feature_dump/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/feature_dump.dir/build.make CMakeFiles/feature_dump.dir/build
+.PHONY : feature_dump/fast
+
+#=============================================================================
 # Target rules for targets named test_replay
 
 # Build rule for target.
@@ -238,6 +251,30 @@ src/event_bus.s: src/event_bus.cpp.s
 src/event_bus.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/helix_engine.dir/build.make CMakeFiles/helix_engine.dir/src/event_bus.cpp.s
 .PHONY : src/event_bus.cpp.s
+
+src/feature_dump.o: src/feature_dump.cpp.o
+.PHONY : src/feature_dump.o
+
+# target to build an object file
+src/feature_dump.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/feature_dump.dir/build.make CMakeFiles/feature_dump.dir/src/feature_dump.cpp.o
+.PHONY : src/feature_dump.cpp.o
+
+src/feature_dump.i: src/feature_dump.cpp.i
+.PHONY : src/feature_dump.i
+
+# target to preprocess a source file
+src/feature_dump.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/feature_dump.dir/build.make CMakeFiles/feature_dump.dir/src/feature_dump.cpp.i
+.PHONY : src/feature_dump.cpp.i
+
+src/feature_dump.s: src/feature_dump.cpp.s
+.PHONY : src/feature_dump.s
+
+# target to generate assembly for a file
+src/feature_dump.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/feature_dump.dir/build.make CMakeFiles/feature_dump.dir/src/feature_dump.cpp.s
+.PHONY : src/feature_dump.cpp.s
 
 src/feature_engine.o: src/feature_engine.cpp.o
 .PHONY : src/feature_engine.o
@@ -488,6 +525,7 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... test"
+	@echo "... feature_dump"
 	@echo "... helix_engine"
 	@echo "... helix_engine_main"
 	@echo "... test_features"
@@ -499,6 +537,9 @@ help:
 	@echo "... src/event_bus.o"
 	@echo "... src/event_bus.i"
 	@echo "... src/event_bus.s"
+	@echo "... src/feature_dump.o"
+	@echo "... src/feature_dump.i"
+	@echo "... src/feature_dump.s"
 	@echo "... src/feature_engine.o"
 	@echo "... src/feature_engine.i"
 	@echo "... src/feature_engine.s"

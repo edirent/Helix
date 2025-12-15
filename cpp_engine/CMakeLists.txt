@@ -20,6 +20,9 @@ target_include_directories(helix_engine PUBLIC include)
 add_executable(helix_engine_main src/main.cpp)
 target_link_libraries(helix_engine_main PRIVATE helix_engine)
 
+add_executable(feature_dump src/feature_dump.cpp)
+target_link_libraries(feature_dump PRIVATE helix_engine)
+
 enable_testing()
 
 add_executable(test_replay tests/test_replay.cpp)

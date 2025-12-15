@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-# 简易研究脚本：读取 L1 CSV，构造研究表，做条件期望并保存图像。
+# 简易研究脚本：调用 C++ feature engine 计算特征，构造研究表，做条件期望并保存图像。
 import argparse
 from pathlib import Path
 import sys
+import subprocess
+import tempfile
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -19,14 +21,31 @@ from python_strategy.research import (
 )
 
 
-def compute_feature(df: pd.DataFrame, bid_col="best_bid", ask_col="best_ask", bid_sz="bid_size", ask_sz="ask_size"):
-    """用 L1 档构造 mid 和 imbalance 特征。"""
-    df = df.copy()
-    spread = (df[ask_col] - df[bid_col]).clip(lower=0.0)
-    df["mid"] = df[bid_col] + spread / 2.0
-    depth = df[bid_sz] + df[ask_sz]
-    df["feature"] = (df[bid_sz] - df[ask_sz]) / depth.replace(0, pd.NA)
-    return df
+def ensure_feature_dump(binary: Path) -> None:
+    if binary.exists():
+        return
+    build_dir = ROOT / "cpp_engine" / "build"
+    cmake_cmd = ["cmake", "-S", str(ROOT / "cpp_engine"), "-B", str(build_dir)]
+    build_cmd = ["cmake", "--build", str(build_dir), "--target", "feature_dump"]
+    for cmd in (cmake_cmd, build_cmd):
+        res = subprocess.run(cmd, cwd=ROOT, text=True)
+        if res.returncode != 0:
+            raise RuntimeError(f"命令失败: {' '.join(cmd)}")
+
+
+def run_feature_dump(input_csv: Path, binary: Path) -> pd.DataFrame:
+    ensure_feature_dump(binary)
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        cmd = [str(binary), str(input_csv), str(tmp_path)]
+        res = subprocess.run(cmd, cwd=ROOT, text=True)
+        if res.returncode != 0:
+            raise RuntimeError(f"feature_dump 运行失败: {' '.join(cmd)}")
+        return pd.read_csv(tmp_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
 
 
 def main():
@@ -34,12 +53,17 @@ def main():
     parser.add_argument("csv", type=Path, help="输入 CSV（含 ts_ms,best_bid,best_ask,bid_size,ask_size）")
     parser.add_argument("--delta-ms", type=int, default=100, help="Δt 毫秒（默认 100ms）")
     parser.add_argument("--out", type=Path, default=Path("condexp.png"), help="输出图像文件")
+    parser.add_argument(
+        "--feature-bin",
+        type=Path,
+        default=ROOT / "cpp_engine" / "build" / "feature_dump",
+        help="C++ feature_dump 可执行文件路径（默认使用构建目录）",
+    )
     args = parser.parse_args()
 
-    raw = pd.read_csv(args.csv)
-    df_feat = compute_feature(raw)
+    df_feat = run_feature_dump(args.csv, args.feature_bin)
 
-    cfg = ResearchTableConfig(ts_col="ts_ms", mid_col="mid", feature_col="feature", delta_ms=args.delta_ms)
+    cfg = ResearchTableConfig(ts_col="ts_ms", mid_col="mid", feature_col="imbalance", delta_ms=args.delta_ms)
     table = build_research_table(df_feat, cfg)
 
     stats = conditional_expectation(table, feature_col=cfg.feature_col, y_col="y", q=10)

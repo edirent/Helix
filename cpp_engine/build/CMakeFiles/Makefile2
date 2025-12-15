@@ -65,6 +65,7 @@ CMAKE_BINARY_DIR = /home/edirent/Helix/cpp_engine/build
 # The main recursive "all" target.
 all: CMakeFiles/helix_engine.dir/all
 all: CMakeFiles/helix_engine_main.dir/all
+all: CMakeFiles/feature_dump.dir/all
 all: CMakeFiles/test_replay.dir/all
 all: CMakeFiles/test_match.dir/all
 all: CMakeFiles/test_features.dir/all
@@ -77,6 +78,7 @@ preinstall:
 # The main recursive "clean" target.
 clean: CMakeFiles/helix_engine.dir/clean
 clean: CMakeFiles/helix_engine_main.dir/clean
+clean: CMakeFiles/feature_dump.dir/clean
 clean: CMakeFiles/test_replay.dir/clean
 clean: CMakeFiles/test_match.dir/clean
 clean: CMakeFiles/test_features.dir/clean
@@ -89,7 +91,7 @@ clean: CMakeFiles/test_features.dir/clean
 CMakeFiles/helix_engine.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/helix_engine.dir/build.make CMakeFiles/helix_engine.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/helix_engine.dir/build.make CMakeFiles/helix_engine.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/edirent/Helix/cpp_engine/build/CMakeFiles --progress-num=1,2,3,4,5,6,7,8,9 "Built target helix_engine"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/edirent/Helix/cpp_engine/build/CMakeFiles --progress-num=3,4,5,6,7,8,9,10,11 "Built target helix_engine"
 .PHONY : CMakeFiles/helix_engine.dir/all
 
 # Build rule for subdir invocation for target.
@@ -115,7 +117,7 @@ CMakeFiles/helix_engine.dir/clean:
 CMakeFiles/helix_engine_main.dir/all: CMakeFiles/helix_engine.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/helix_engine_main.dir/build.make CMakeFiles/helix_engine_main.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/helix_engine_main.dir/build.make CMakeFiles/helix_engine_main.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/edirent/Helix/cpp_engine/build/CMakeFiles --progress-num=10,11 "Built target helix_engine_main"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/edirent/Helix/cpp_engine/build/CMakeFiles --progress-num=12,13 "Built target helix_engine_main"
 .PHONY : CMakeFiles/helix_engine_main.dir/all
 
 # Build rule for subdir invocation for target.
@@ -135,13 +137,39 @@ CMakeFiles/helix_engine_main.dir/clean:
 .PHONY : CMakeFiles/helix_engine_main.dir/clean
 
 #=============================================================================
+# Target rules for target CMakeFiles/feature_dump.dir
+
+# All Build rule for target.
+CMakeFiles/feature_dump.dir/all: CMakeFiles/helix_engine.dir/all
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/feature_dump.dir/build.make CMakeFiles/feature_dump.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/feature_dump.dir/build.make CMakeFiles/feature_dump.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/edirent/Helix/cpp_engine/build/CMakeFiles --progress-num=1,2 "Built target feature_dump"
+.PHONY : CMakeFiles/feature_dump.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/feature_dump.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/edirent/Helix/cpp_engine/build/CMakeFiles 11
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/feature_dump.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/edirent/Helix/cpp_engine/build/CMakeFiles 0
+.PHONY : CMakeFiles/feature_dump.dir/rule
+
+# Convenience name for target.
+feature_dump: CMakeFiles/feature_dump.dir/rule
+.PHONY : feature_dump
+
+# clean rule for target.
+CMakeFiles/feature_dump.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/feature_dump.dir/build.make CMakeFiles/feature_dump.dir/clean
+.PHONY : CMakeFiles/feature_dump.dir/clean
+
+#=============================================================================
 # Target rules for target CMakeFiles/test_replay.dir
 
 # All Build rule for target.
 CMakeFiles/test_replay.dir/all: CMakeFiles/helix_engine.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_replay.dir/build.make CMakeFiles/test_replay.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_replay.dir/build.make CMakeFiles/test_replay.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/edirent/Helix/cpp_engine/build/CMakeFiles --progress-num=16,17 "Built target test_replay"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/edirent/Helix/cpp_engine/build/CMakeFiles --progress-num=18,19 "Built target test_replay"
 .PHONY : CMakeFiles/test_replay.dir/all
 
 # Build rule for subdir invocation for target.
@@ -167,7 +195,7 @@ CMakeFiles/test_replay.dir/clean:
 CMakeFiles/test_match.dir/all: CMakeFiles/helix_engine.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_match.dir/build.make CMakeFiles/test_match.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_match.dir/build.make CMakeFiles/test_match.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/edirent/Helix/cpp_engine/build/CMakeFiles --progress-num=14,15 "Built target test_match"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/edirent/Helix/cpp_engine/build/CMakeFiles --progress-num=16,17 "Built target test_match"
 .PHONY : CMakeFiles/test_match.dir/all
 
 # Build rule for subdir invocation for target.
@@ -193,7 +221,7 @@ CMakeFiles/test_match.dir/clean:
 CMakeFiles/test_features.dir/all: CMakeFiles/helix_engine.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_features.dir/build.make CMakeFiles/test_features.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_features.dir/build.make CMakeFiles/test_features.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/edirent/Helix/cpp_engine/build/CMakeFiles --progress-num=12,13 "Built target test_features"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/edirent/Helix/cpp_engine/build/CMakeFiles --progress-num=14,15 "Built target test_features"
 .PHONY : CMakeFiles/test_features.dir/all
 
 # Build rule for subdir invocation for target.
