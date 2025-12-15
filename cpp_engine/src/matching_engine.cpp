@@ -9,12 +9,13 @@ Fill MatchingEngine::simulate(const Action &action, const OrderbookSnapshot &boo
     fill.partial = false;
 
     if (action.side == Side::Buy) {
-        fill.price = book.best_ask > 0 ? book.best_ask : book.best_bid;
+      if (book.best_ask <= 0) return Fill::reject(action, "no_ask");
+      fill.price = book.best_ask;
     } else if (action.side == Side::Sell) {
-        fill.price = book.best_bid > 0 ? book.best_bid : book.best_ask;
+      if (book.best_bid <= 0) return Fill::reject(action, "no_bid");
+      fill.price = book.best_bid;
     } else {
-        fill.price = 0.0;
-        fill.qty = 0.0;
+      return Fill::reject(action, "bad_side");
     }
 
     return fill;
