@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -20,22 +21,24 @@ import (
 )
 
 const (
-	progVersion = "bybit_recorder/1.0"
+	progVersion = "bybit_recorder/1.1"
 
 	// Reliability knobs
-	readTimeout  = 30 * time.Second // read deadline (no msg for this long => treat as stalled)
-	pingInterval = 15 * time.Second // keepalive
+	readTimeout  = 30 * time.Second
+	pingInterval = 15 * time.Second
 	pingTimeout  = 5 * time.Second
 
 	// Reconnect backoff
 	backoffBase = 250 * time.Millisecond
 	backoffMax  = 8 * time.Second
 
-	// CSV flush policy (not required by A, but avoids data loss without flushing every row)
-	flushEveryN       = 200
-	flushEveryDur     = 500 * time.Millisecond
-	closeReasonNormal = "done"
-	closeReasonRetry  = "reconnect"
+	// Writer performance knobs
+	rowChanSize     = 8192
+	bufioSize       = 1 << 20 // 1MB
+	flushEveryN     = 200
+	flushEveryDur   = 500 * time.Millisecond
+	closeReasonDone = "done"
+	closeReasonRetry = "reconnect"
 )
 
 type orderbookMsg struct {
@@ -49,11 +52,6 @@ type orderbookMsg struct {
 	} `json:"data"`
 }
 
-type pxLevel struct {
-	price float64
-	size  float64
-}
-
 type metaInfo struct {
 	Version    string `json:"version"`
 	Symbol     string `json:"symbol"`
@@ -63,6 +61,15 @@ type metaInfo struct {
 	StartTime  string `json:"start_time"`
 	OutputCSV  string `json:"output_csv"`
 	OutputMeta string `json:"output_meta"`
+}
+
+// 传给 writer 的最小数据结构：全部用原始 string，避免 float/format 成本
+type csvRow struct {
+	tsMs   int64
+	bidPx  string
+	askPx  string
+	bidQty string
+	askQty string
 }
 
 func main() {
@@ -80,16 +87,17 @@ func main() {
 	startWall := time.Now()
 	endWall := startWall.Add(*duration)
 
+	runCtx, cancel := context.WithDeadline(rootCtx, endWall)
+	defer cancel()
+
 	// Ensure output dir exists
 	outDir := filepath.Dir(*out)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		log.Fatalf("mkdir output dir: %v", err)
 	}
 
-	// Prepare meta sidecar path
+	// Prepare meta sidecar path + write meta once
 	metaPath := sidecarMetaPath(*out)
-
-	// Write meta JSON once (start-of-run)
 	topic := fmt.Sprintf("orderbook.%d.%s", *depth, *symbol)
 	if err := writeMeta(metaPath, metaInfo{
 		Version:    progVersion,
@@ -112,69 +120,72 @@ func main() {
 	}
 	defer f.Close()
 
-	w := csv.NewWriter(f)
-	if err := w.Write([]string{"ts_ms", "best_bid", "best_ask", "bid_size", "ask_size"}); err != nil {
-		log.Fatalf("write header: %v", err)
-	}
-	w.Flush()
-	if err := w.Error(); err != nil {
-		log.Fatalf("flush header: %v", err)
-	}
+	// Channel: reader -> writer
+	rowCh := make(chan csvRow, rowChanSize)
+
+	// Start writer goroutine
+	var rowsWritten uint64
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		n := writerLoop(runCtx, f, rowCh)
+		atomic.StoreUint64(&rowsWritten, n)
+	}()
 
 	log.Printf("recording %s (%s), depth=%d, out=%s",
 		*symbol, *endpoint, *depth, *out)
 
-	var rows uint64
-	lastFlush := time.Now()
-	rowsSinceFlush := 0
+	// Start reader loop (handles reconnect + subscribe)
+	readLoop(runCtx, *endpoint, topic, rowCh)
 
-	// Outer loop: (re)connect until time is up / cancelled
+	// Reader is done => close channel so writer can drain and exit
+	close(rowCh)
+	<-writerDone
+
+	elapsed := time.Since(startWall).Truncate(time.Second)
+	log.Printf("recorded %s, rows=%d, csv=%s, meta=%s",
+		elapsed, atomic.LoadUint64(&rowsWritten), *out, metaPath)
+}
+
+// 读/解析 + 重连：只做网络和 JSON，写盘完全交给 writer
+func readLoop(ctx context.Context, endpoint, topic string, out chan<- csvRow) {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	attempt := 0
 
 	for {
-		// stop conditions
-		if rootCtx.Err() != nil || time.Now().After(endWall) {
-			break
+		if ctx.Err() != nil {
+			return
 		}
 
-		// dial + subscribe (with backoff)
-		conn, err := dialAndSubscribe(rootCtx, *endpoint, topic, attempt, rng)
+		conn, err := dialAndSubscribe(ctx, endpoint, topic, attempt, rng)
 		if err != nil {
-			log.Printf("dial/subscribe failed: %v", err)
-			// if context cancelled or time's up, exit
-			if rootCtx.Err() != nil || time.Now().After(endWall) {
-				break
+			if ctx.Err() != nil {
+				return
 			}
 			attempt++
 			continue
 		}
-		attempt = 0 // reset backoff after a successful connect
+		attempt = 0
 
 		// Heartbeat ping loop
-		pingCtx, pingCancel := context.WithCancel(rootCtx)
+		pingCtx, pingCancel := context.WithCancel(ctx)
 		go pingLoop(pingCtx, conn)
 
-		// Read loop
 		for {
-			if rootCtx.Err() != nil || time.Now().After(endWall) {
+			if ctx.Err() != nil {
 				pingCancel()
-				_ = conn.Close(websocket.StatusNormalClosure, closeReasonNormal)
-				break
+				_ = conn.Close(websocket.StatusNormalClosure, closeReasonDone)
+				return
 			}
 
-			// Read deadline via context timeout
-			readCtx, cancel := context.WithTimeout(rootCtx, readTimeout)
+			readCtx, cancel := context.WithTimeout(ctx, readTimeout)
 			_, data, err := conn.Read(readCtx)
 			cancel()
 
 			if err != nil {
-				// If read timed out or any read error => reconnect
+				// reconnect
 				pingCancel()
 				_ = conn.Close(websocket.StatusNormalClosure, closeReasonRetry)
-
-				// Normal closure can still happen; if time remains, we reconnect anyway
-				log.Printf("read error (will reconnect): %v", err)
 				break
 			}
 
@@ -185,10 +196,8 @@ func main() {
 			if len(msg.Data.Bids) == 0 || len(msg.Data.Asks) == 0 {
 				continue
 			}
-
-			bestBid, err1 := parsePx(msg.Data.Bids[0])
-			bestAsk, err2 := parsePx(msg.Data.Asks[0])
-			if err1 != nil || err2 != nil {
+			// top-of-book requires [price, size]
+			if len(msg.Data.Bids[0]) < 2 || len(msg.Data.Asks[0]) < 2 {
 				continue
 			}
 
@@ -197,49 +206,101 @@ func main() {
 				ts = time.Now().UnixNano() / int64(time.Millisecond)
 			}
 
-			record := []string{
-				strconv.FormatInt(ts, 10),
-				fmt.Sprintf("%.10f", bestBid.price),
-				fmt.Sprintf("%.10f", bestAsk.price),
-				fmt.Sprintf("%.6f", bestBid.size),
-				fmt.Sprintf("%.6f", bestAsk.size),
-			}
-			if err := w.Write(record); err != nil {
-				// disk/write error is fatal in practice
-				log.Fatalf("write row: %v", err)
+			row := csvRow{
+				tsMs:   ts,
+				bidPx:  msg.Data.Bids[0][0], // 原始字符串
+				bidQty: msg.Data.Bids[0][1],
+				askPx:  msg.Data.Asks[0][0],
+				askQty: msg.Data.Asks[0][1],
 			}
 
-			atomic.AddUint64(&rows, 1)
-			rowsSinceFlush++
-
-			// periodic flush (avoid flushing every row)
-			if rowsSinceFlush >= flushEveryN || time.Since(lastFlush) >= flushEveryDur {
-				w.Flush()
-				if err := w.Error(); err != nil {
-					log.Fatalf("flush csv: %v", err)
-				}
-				lastFlush = time.Now()
-				rowsSinceFlush = 0
+			// 如果 writer 来不及写：这里会 backpressure（不会悄悄丢数据）
+			select {
+			case out <- row:
+			case <-ctx.Done():
+				pingCancel()
+				_ = conn.Close(websocket.StatusNormalClosure, closeReasonDone)
+				return
 			}
 		}
 	}
+}
 
-	// Final flush
+// writer：只负责写盘 + 批量 flush
+func writerLoop(ctx context.Context, f *os.File, rows <-chan csvRow) uint64 {
+	bw := bufio.NewWriterSize(f, bufioSize)
+	defer bw.Flush()
+
+	w := csv.NewWriter(bw)
+	defer w.Flush()
+
+	if err := w.Write([]string{"ts_ms", "best_bid", "best_ask", "bid_size", "ask_size"}); err != nil {
+		log.Fatalf("write header: %v", err)
+	}
 	w.Flush()
 	if err := w.Error(); err != nil {
-		log.Printf("final flush error: %v", err)
+		log.Fatalf("flush header: %v", err)
 	}
 
-	elapsed := time.Since(startWall).Truncate(time.Second)
-	log.Printf("recorded %s, rows=%d, csv=%s, meta=%s",
-		elapsed, atomic.LoadUint64(&rows), *out, metaPath)
+	ticker := time.NewTicker(flushEveryDur)
+	defer ticker.Stop()
+
+	var n uint64
+	sinceFlush := 0
+
+	// 复用 slice，避免每行分配 []string
+	rec := make([]string, 5)
+
+	flush := func() {
+		w.Flush()
+		if err := w.Error(); err != nil {
+			log.Fatalf("flush csv: %v", err)
+		}
+		// bufio flush 由 w.Flush() 触发写入到 bw；最后再 bw.Flush() 确保落盘
+		if err := bw.Flush(); err != nil {
+			log.Fatalf("flush bufio: %v", err)
+		}
+		sinceFlush = 0
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			// drain? 这里不 drain，退出由 rowCh close + writerDone 控制
+			flush()
+			return n
+		case <-ticker.C:
+			if sinceFlush > 0 {
+				flush()
+			}
+		case row, ok := <-rows:
+			if !ok {
+				flush()
+				return n
+			}
+
+			rec[0] = strconv.FormatInt(row.tsMs, 10)
+			rec[1] = row.bidPx
+			rec[2] = row.askPx
+			rec[3] = row.bidQty
+			rec[4] = row.askQty
+
+			if err := w.Write(rec); err != nil {
+				log.Fatalf("write row: %v", err)
+			}
+
+			n++
+			sinceFlush++
+			if sinceFlush >= flushEveryN {
+				flush()
+			}
+		}
+	}
 }
 
 func dialAndSubscribe(ctx context.Context, endpoint, topic string, attempt int, rng *rand.Rand) (*websocket.Conn, error) {
-	// Backoff if attempt > 0
 	if attempt > 0 {
 		delay := computeBackoff(attempt, rng)
-		log.Printf("reconnect backoff: %s (attempt=%d)", delay, attempt)
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
@@ -249,7 +310,6 @@ func dialAndSubscribe(ctx context.Context, endpoint, topic string, attempt int, 
 		}
 	}
 
-	// Dial with a short timeout so we don't hang forever
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -258,7 +318,6 @@ func dialAndSubscribe(ctx context.Context, endpoint, topic string, attempt int, 
 		return nil, fmt.Errorf("dial: %w", err)
 	}
 
-	// Subscribe with timeout
 	sub := map[string]any{
 		"op":   "subscribe",
 		"args": []string{topic},
@@ -272,8 +331,6 @@ func dialAndSubscribe(ctx context.Context, endpoint, topic string, attempt int, 
 		_ = conn.Close(websocket.StatusNormalClosure, "subscribe failed")
 		return nil, fmt.Errorf("subscribe write: %w", err)
 	}
-
-	log.Printf("subscribed to %s (%s)", topic, endpoint)
 	return conn, nil
 }
 
@@ -289,7 +346,6 @@ func pingLoop(ctx context.Context, conn *websocket.Conn) {
 			err := conn.Ping(pctx)
 			cancel()
 			if err != nil {
-				// Ping failure will be noticed by read loop soon; we just exit ping goroutine.
 				return
 			}
 		}
@@ -297,8 +353,6 @@ func pingLoop(ctx context.Context, conn *websocket.Conn) {
 }
 
 func computeBackoff(attempt int, rng *rand.Rand) time.Duration {
-	// exp backoff with cap + small jitter
-	// delay = min(max, base * 2^(attempt-1)) + jitter(0..150ms)
 	exp := attempt - 1
 	if exp > 10 {
 		exp = 10
@@ -309,21 +363,6 @@ func computeBackoff(attempt int, rng *rand.Rand) time.Duration {
 	}
 	jitter := time.Duration(rng.Intn(150)) * time.Millisecond
 	return delay + jitter
-}
-
-func parsePx(level []string) (pxLevel, error) {
-	if len(level) < 2 {
-		return pxLevel{}, fmt.Errorf("bad level")
-	}
-	p, err := strconv.ParseFloat(level[0], 64)
-	if err != nil {
-		return pxLevel{}, err
-	}
-	q, err := strconv.ParseFloat(level[1], 64)
-	if err != nil {
-		return pxLevel{}, err
-	}
-	return pxLevel{price: p, size: q}, nil
 }
 
 func sidecarMetaPath(csvPath string) string {
@@ -339,7 +378,5 @@ func writeMeta(path string, meta metaInfo) error {
 	if err != nil {
 		return err
 	}
-	// create/truncate
 	return os.WriteFile(path, b, 0o644)
 }
-
