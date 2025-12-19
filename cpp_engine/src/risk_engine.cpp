@@ -19,13 +19,21 @@ bool RiskEngine::validate(const Action &action, double last_price) const {
 void RiskEngine::update(const Fill &fill) {
     const double signed_qty = (fill.side == Side::Buy ? fill.qty : -fill.qty);
     const double previous_qty = position_.qty;
+    const double previous_avg = position_.avg_price;
     const double new_qty = previous_qty + signed_qty;
 
+    // Realized PnL when reducing or flipping.
+    if (previous_qty != 0.0 && ((previous_qty > 0 && signed_qty < 0) || (previous_qty < 0 && signed_qty > 0))) {
+        const double closed_qty = std::min(std::abs(previous_qty), std::abs(signed_qty));
+        const double realized = closed_qty * (fill.price - previous_avg) * (previous_qty > 0 ? 1.0 : -1.0);
+        position_.realized_pnl += realized;
+        position_.pnl += realized;
+    }
+
     if (new_qty == 0.0) {
-        position_.pnl += (fill.price - position_.avg_price) * previous_qty;
         position_.avg_price = 0.0;
     } else {
-        const double gross_value = position_.avg_price * previous_qty + fill.price * signed_qty;
+        const double gross_value = previous_avg * previous_qty + fill.price * signed_qty;
         position_.avg_price = gross_value / new_qty;
     }
     position_.qty = new_qty;

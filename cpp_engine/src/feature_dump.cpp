@@ -101,7 +101,8 @@ int main(int argc, char **argv) {
         const double spread = std::max(0.0, row.ask - row.bid);
         const double mid = (spread > 0.0) ? row.bid + spread / 2.0 : row.bid;
         const TradeTape tape{mid, 0.0};  // no trade info; neutral trend/sweep
-        const auto feat = engine.compute(OrderbookSnapshot{row.bid, row.ask, row.bid_size, row.ask_size}, tape);
+        const auto feat =
+            engine.compute(OrderbookSnapshot{row.ts_ms, row.bid, row.ask, row.bid_size, row.ask_size}, tape);
 
         *out << row.ts_ms << "," << row.bid << "," << row.ask << "," << row.bid_size << "," << row.ask_size << ",";
         *out << mid << "," << feat.imbalance << "," << feat.microprice << "," << feat.pressure_bid << ","

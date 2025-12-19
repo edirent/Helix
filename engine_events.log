@@ -162,3 +162,13 @@
 2025-12-14 04:25:55 | 0 | bid=90168.5 ask=90168.6
 2025-12-14 04:25:55 | 0 | bid=90168.5 ask=90168.6
 2025-12-14 04:25:55 | 0 | bid=90168.5 ask=90168.6
+2025-12-19 21:41:33 | 0 | bid=100 ask=100.5
+2025-12-19 21:41:33 | 0 | bid=100.1 ask=100.6
+2025-12-19 21:41:33 | 3 | fill side=1 vwap=100.1 filled=1 unfilled=0 levels=1 slip_ticks=0 partial=0 spread_paid_ticks=25 liq=T adv_ticks=0 fee=0.06006 gross=-0.25 net=-0.31006 fees_tot=0.06006 net_tot=-0.31006
+2025-12-19 21:41:33 | 0 | bid=100.2 ask=100.7
+2025-12-19 21:41:33 | 3 | fill side=1 vwap=100.2 filled=1 unfilled=0 levels=1 slip_ticks=0 partial=0 spread_paid_ticks=25 liq=T adv_ticks=0 fee=0.06012 gross=-0.25 net=-0.31012 fees_tot=0.12018 net_tot=-0.62018
+2025-12-19 21:42:14 | 0 | bid=100 ask=100.5
+2025-12-19 21:42:14 | 0 | bid=100.1 ask=100.6
+2025-12-19 21:42:14 | 3 | fill side=1 vwap=100.1 filled=1 unfilled=0 levels=1 slip_ticks=0 partial=0 spread_paid_ticks=25 liq=T adv_ticks=0 fee=0.06006 gross=-0.25 net=-0.31006 fees_tot=0.06006 net_tot=-0.31006
+2025-12-19 21:42:14 | 0 | bid=100.2 ask=100.7
+2025-12-19 21:42:14 | 3 | fill side=1 vwap=100.2 filled=1 unfilled=0 levels=1 slip_ticks=0 partial=0 spread_paid_ticks=25 liq=T adv_ticks=0 fee=0.06012 gross=-0.25 net=-0.31012 fees_tot=0.12018 net_tot=-0.62018

@@ -6,7 +6,7 @@
 
 int main() {
     helix::engine::FeatureEngine fe;
-    helix::engine::OrderbookSnapshot book{100.0, 101.0, 5.0, 3.0};
+    helix::engine::OrderbookSnapshot book{0, 100.0, 101.0, 5.0, 3.0};
     helix::engine::TradeTape tape{100.5, 1.0};
 
     auto feature = fe.compute(book, tape);

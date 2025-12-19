@@ -11,6 +11,7 @@ class RiskEngine {
 
     bool validate(const Action &action, double last_price) const;
     void update(const Fill &fill);
+    double realized_pnl() const { return position_.realized_pnl; }
     const Position &position() const { return position_; }
 
   private:
