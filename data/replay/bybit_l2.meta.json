@@ -4,7 +4,7 @@
   "endpoint": "wss://stream.bybit.com/v5/public/linear",
   "depth": 50,
   "topic": "orderbook.50.BTCUSDT",
-  "start_time": "2025-12-19T22:10:57.643636393+04:00",
+  "start_time": "2025-12-20T03:45:01.160600364+04:00",
   "output_csv": "../data/replay/bybit_l2.csv",
   "output_meta": "../data/replay/bybit_l2.meta.json"
 }

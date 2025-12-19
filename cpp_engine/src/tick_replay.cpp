@@ -320,14 +320,15 @@ bool TickReplay::apply_next_delta() {
     }
     const auto &d = deltas_[delta_cursor_++];
 
-    if (d.snapshot) {
+    const bool implicit_snapshot = (!d.snapshot && d.prev_seq == 0);
+    if (d.snapshot || implicit_snapshot) {
         bids_.clear();
         asks_.clear();
         snapshot_in_progress_ = true;
     } else {
-        if (last_seq_ >= 0 && d.prev_seq > 0 && d.prev_seq != last_seq_) {
-            utils::warn("TickReplay detected seq gap: prev=" + std::to_string(last_seq_) +
-                        " next_prev=" + std::to_string(d.prev_seq));
+        if (last_seq_ >= 0 && d.prev_seq != last_seq_) {
+            utils::error("TickReplay detected seq gap: prev=" + std::to_string(last_seq_) +
+                         " next_prev=" + std::to_string(d.prev_seq));
             return false;
         }
     }
