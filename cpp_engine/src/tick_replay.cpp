@@ -323,6 +323,7 @@ bool TickReplay::apply_next_delta() {
     if (d.snapshot) {
         bids_.clear();
         asks_.clear();
+        snapshot_in_progress_ = true;
     } else {
         if (last_seq_ >= 0 && d.prev_seq > 0 && d.prev_seq != last_seq_) {
             utils::warn("TickReplay detected seq gap: prev=" + std::to_string(last_seq_) +
@@ -362,6 +363,9 @@ bool TickReplay::apply_next_delta() {
     constexpr std::size_t kKeep = 10;
     if (recent_deltas_.size() > kKeep) {
         recent_deltas_.pop_front();
+    }
+    if (snapshot_in_progress_ && orderbook_.best_bid > 0.0 && orderbook_.best_ask > 0.0) {
+        snapshot_in_progress_ = false;
     }
     return true;
 }
@@ -411,6 +415,10 @@ bool TickReplay::check_invariants(const OrderbookSnapshot &book) {
         ++invariant_violations_;
         utils::error("[TickReplay invariant] " + msg);
     };
+
+    if (snapshot_in_progress_ && (book.best_bid == 0.0 || book.best_ask == 0.0)) {
+        return true;  // skip checks until snapshot fully populated
+    }
 
     if (!(book.best_bid > 0.0 && book.best_ask > 0.0 && book.best_bid < book.best_ask)) {
         warn_once("best_bid/best_ask invalid: " + std::to_string(book.best_bid) + " / " +

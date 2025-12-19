@@ -61,6 +61,7 @@ class TickReplay {
     std::ofstream bookcheck_out_;
     std::size_t bookcheck_interval_{0};
     std::size_t bookcheck_counter_{0};
+    bool snapshot_in_progress_{false};
 };
 
 }  // namespace helix::engine
