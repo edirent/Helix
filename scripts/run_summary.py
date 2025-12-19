@@ -6,13 +6,13 @@ Run engine for a short replay and emit summary:
 - net_sharpe over 1s/10s buckets
 - spread_cost_ticks quantiles per side
 - adv_penalty_ticks mean (maker only)
+- fee_bps / filled_notional sanity (demo mode)
 """
 import argparse
 import csv
 import json
 import subprocess
 import sys
-import re
 import tempfile
 from pathlib import Path
 import numpy as np
@@ -20,29 +20,43 @@ import numpy as np
 ENGINE_BIN = Path("cpp_engine/build/helix_engine_main")
 DEFAULT_REPLAY = Path("data/replay/bybit_l2.csv")
 
-FILL_RE = re.compile(
-    r"fill side=(?P<side>\d).*spread_paid_ticks=(?P<spr>[\d.e+-]+).*liq=(?P<liq>[MT]).*"
-    r"adv_ticks=(?P<adv>[\d.e+-]+).*fee=(?P<fee>[\d.e+-]+).*gross=(?P<gross>[\d.e+-]+)"
-)
+def kv_pairs(line: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for tok in line.strip().split():
+        if "=" not in tok:
+            continue
+        k, v = tok.split("=", 1)
+        out[k] = v
+    return out
 
 def parse_log(log_path: Path):
     fills = []
     net_sharpes = {"1s": None, "10s": None}
     with log_path.open() as f:
         for line in f:
-            m = FILL_RE.search(line)
-            if m:
-                side = "BUY" if m.group("side") == "0" else "SELL"
-                fills.append(
-                    dict(
-                        side=side,
-                        liq=m.group("liq"),
-                        spread=float(m.group("spr")),
-                        adv=float(m.group("adv")),
-                        fee=float(m.group("fee")),
-                        gross=float(m.group("gross")),
+            if "fill side=" in line:
+                kv = kv_pairs(line)
+                try:
+                    side = "BUY" if kv.get("side", "") == "0" else "SELL"
+                    fills.append(
+                        dict(
+                            side=side,
+                            liq=kv.get("liq", ""),
+                            spread=float(kv.get("spread_paid_ticks", "0")),
+                            adv=float(kv.get("adv_ticks", "0")),
+                            fee=float(kv.get("fee", "0")),
+                            gross=float(kv.get("gross", "0")),
+                            fee_bps=float(kv["fee_bps"]) if "fee_bps" in kv else None,
+                            target_notional=float(kv.get("target_notional", "0")),
+                            filled_notional=float(kv.get("filled_notional", "0")),
+                            src=kv.get("src", ""),
+                            best=float(kv["best"]) if "best" in kv else None,
+                            mid=float(kv["mid"]) if "mid" in kv else None,
+                            exec_cost=float(kv["exec_cost_ticks_signed"]) if "exec_cost_ticks_signed" in kv else None,
+                        )
                     )
-                )
+                except ValueError:
+                    continue
             if "net_sharpe_1s" in line:
                 parts = dict(
                     kv.split("=") for kv in line.strip().split() if "=" in kv
@@ -62,9 +76,19 @@ def summarize(fills, net_sharpes):
         vals = [f["spread"] for f in fills if f["side"] == side]
         if vals:
             spread_q[side] = np.percentile(vals, [50, 90, 99]).tolist()
-    adv_mean = (
-        sum(f["adv"] for f in makers) / len(makers) if makers else 0.0
-    )
+    adv_mean = sum(f["adv"] for f in makers) / len(makers) if makers else 0.0
+    fee_bps_vals = [f["fee_bps"] for f in fills if f.get("fee_bps") is not None]
+    notional_target = [f["target_notional"] for f in fills if f.get("target_notional") is not None]
+    notional_filled = [f["filled_notional"] for f in fills if f.get("filled_notional") is not None]
+    fill_to_target = [
+        f["filled_notional"] / f["target_notional"]
+        for f in fills
+        if f.get("target_notional", 0) > 0
+    ]
+    exec_costs = [f["exec_cost"] for f in fills if f.get("exec_cost") is not None]
+    src_counts = {}
+    for f in fills:
+        src_counts[f.get("src", "")] = src_counts.get(f.get("src", ""), 0) + 1
     return {
         "fills_total": len(fills),
         "makers": len(makers),
@@ -74,6 +98,20 @@ def summarize(fills, net_sharpes):
         "net_sharpe_10s": net_sharpes["10s"],
         "spread_cost_ticks": spread_q,
         "adv_penalty_ticks_mean": adv_mean,
+        "fee_bps_p50": float(np.percentile(fee_bps_vals, 50)) if fee_bps_vals else None,
+        "fee_bps_p90": float(np.percentile(fee_bps_vals, 90)) if fee_bps_vals else None,
+        "filled_notional_p50": float(np.percentile(notional_filled, 50)) if notional_filled else None,
+        "filled_notional_p90": float(np.percentile(notional_filled, 90)) if notional_filled else None,
+        "filled_to_target_p50": float(np.percentile(fill_to_target, 50)) if fill_to_target else None,
+        "filled_to_target_p99": float(np.percentile(fill_to_target, 99)) if fill_to_target else None,
+        "exec_cost_ticks_signed": {
+            "p50": float(np.percentile(exec_costs, 50)) if exec_costs else None,
+            "p90": float(np.percentile(exec_costs, 90)) if exec_costs else None,
+            "p99": float(np.percentile(exec_costs, 99)) if exec_costs else None,
+            "min": float(np.min(exec_costs)) if exec_costs else None,
+            "max": float(np.max(exec_costs)) if exec_costs else None,
+        },
+        "src_counts": src_counts,
     }
 
 def looks_like_l2_csv(path: Path) -> bool:
@@ -124,6 +162,10 @@ def run_and_report():
     parser.add_argument("--replay", type=Path, default=DEFAULT_REPLAY, help="L2 delta CSV (seq,prev_seq,book_side,price,size,ts_ms)")
     parser.add_argument("--engine", type=Path, default=ENGINE_BIN, help="Path to helix_engine_main")
     parser.add_argument("--no-actions", action="store_true", help="Disable strategy actions (engine --no_actions)")
+    parser.add_argument("--demo-notional", type=float, default=None, help="Run demo taker mode with fixed notional (quote)")
+    parser.add_argument("--demo-interval-ms", type=int, default=500, help="Interval between demo actions")
+    parser.add_argument("--demo-max", type=int, default=30, help="Max demo actions to issue")
+    parser.add_argument("--demo-only", action="store_true", help="Summarize only src=DEMO fills")
     args = parser.parse_args()
 
     replay_csv = ensure_replay_path(args.replay)
@@ -138,8 +180,21 @@ def run_and_report():
     cmd = [str(engine_bin), str(replay_csv)]
     if args.no_actions:
         cmd.append("--no_actions")
+    if args.demo_notional is not None:
+        cmd.extend(
+            [
+                "--demo_notional",
+                str(args.demo_notional),
+                "--demo_interval_ms",
+                str(args.demo_interval_ms),
+                "--demo_max",
+                str(args.demo_max),
+            ]
+        )
     subprocess.run(cmd, stderr=open(log_file, "w"), stdout=subprocess.DEVNULL, check=True)
     fills, sharpes = parse_log(log_file)
+    if args.demo_only:
+        fills = [f for f in fills if f.get("src") == "DEMO"]
     summary = summarize(fills, sharpes)
     print(json.dumps(summary, indent=2))
     print(f"# log at {log_file}")

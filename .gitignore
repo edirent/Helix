@@ -1,0 +1,46 @@
+# Build output
+/build/
+/cpp_engine/build/
+/bin/
+/obj/
+/out/
+/dist/
+
+# CMake generated files
+/CMakeCache.txt
+/CMakeFiles/
+/cmake_install.cmake
+*/CMakeCache.txt
+*/CMakeFiles/
+*/cmake_install.cmake
+*.ninja
+.ninja_log
+.ninja_deps
+CTestTestfile.cmake
+Testing/
+Makefile
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.d
+
+# Logs and caches
+*.log
+.cache/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local overrides
+local.mk
+config.local
+*.local

@@ -35,6 +35,8 @@ struct PendingAction {
     int64_t fill_ts{0};
     uint64_t seq{0};
     uint64_t action_idx{0};
+    bool demo{false};
+    double target_notional{0.0};
 };
 
 struct PnLAggregate {
@@ -226,6 +228,7 @@ int main(int argc, char **argv) {
     bool no_actions = false;
     double demo_notional = 0.0;
     int64_t demo_interval_ms = 500;
+    int demo_max_actions = 30;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--no_actions") {
@@ -234,6 +237,8 @@ int main(int argc, char **argv) {
             demo_notional = std::stod(argv[++i]);
         } else if (arg == "--demo_interval_ms" && i + 1 < argc) {
             demo_interval_ms = std::stoll(argv[++i]);
+        } else if (arg == "--demo_max" && i + 1 < argc) {
+            demo_max_actions = std::stoi(argv[++i]);
         } else if (replay_source == "data/replay/synthetic.csv") {
             replay_source = arg;
         } else {
@@ -260,6 +265,11 @@ int main(int argc, char **argv) {
     MakerParams maker_params{};
     MakerQueueSim maker_sim(maker_params, tick_size);
     int64_t last_demo_ts = 0;
+    int demo_sent = 0;
+    const bool demo_mode = demo_notional > 0.0;
+    if (demo_mode) {
+        no_actions = false;  // demo overrides global no_actions intent
+    }
 
     transport::ZmqServer feature_pub("tcp://*:7001");
     transport::GrpcServer action_pub("0.0.0.0:50051");
@@ -356,14 +366,33 @@ int main(int argc, char **argv) {
                     pnl.net_by_10s[bucket_10s] += net_delta;
 
                     std::stringstream ss;
+                    const double target_notional = pending.target_notional;
+                    if (target_notional > 0.0 && notional > target_notional * 1.001) {
+                        std::stringstream err;
+                        err << "[fee_sanity] filled_notional " << notional << " exceeds target " << target_notional;
+                        utils::error(err.str());
+                        std::exit(1);
+                    }
+                    double best = (pending.action.side == engine::Side::Buy) ? replay.current_book().best_ask
+                                                                              : replay.current_book().best_bid;
+                    double mid_to_best_ticks = (mid > 0.0 && best > 0.0) ? (mid - best) / tick_size : 0.0;
+                    double exec_cost_ticks_signed = 0.0;
+                    if (mid > 0.0) {
+                        exec_cost_ticks_signed =
+                            (pending.action.side == engine::Side::Buy) ? (fill.vwap_price - mid) / tick_size
+                                                                       : (mid - fill.vwap_price) / tick_size;
+                    }
                     ss << "fill side=" << static_cast<int>(fill.side) << " vwap=" << fill.vwap_price
                        << " filled=" << fill.filled_qty << " unfilled=" << fill.unfilled_qty
                        << " levels=" << fill.levels_crossed << " slip_ticks=" << fill.slippage_ticks
                        << " partial=" << (fill.partial ? 1 : 0) << " spread_paid_ticks=" << spread_paid_ticks
                        << " liq=" << (fill.liquidity == engine::Liquidity::Maker ? "M" : "T")
+                       << " src=" << (pending.demo ? "DEMO" : "STRAT")
+                       << " target_notional=" << target_notional << " filled_notional=" << notional
+                       << " best=" << best << " mid=" << mid << " mid_to_best_ticks=" << mid_to_best_ticks
+                       << " exec_cost_ticks_signed=" << exec_cost_ticks_signed
                        << " adv_ticks=" << (fill.liquidity == engine::Liquidity::Maker ? maker_params.adv_ticks : 0.0)
-                       << " notional=" << notional << " fee=" << fee_paid << " fee_bps=" << fee_bps
-                       << " gross=" << gross_delta << " net=" << net_delta
+                       << " fee=" << fee_paid << " fee_bps=" << fee_bps << " gross=" << gross_delta << " net=" << net_delta
                        << " fees_tot=" << pnl.fees << " net_tot=" << pnl.net();
                     bus.publish(engine::Event{engine::Event::Type::Fill, ss.str()});
                     utils::info(ss.str());
@@ -381,23 +410,38 @@ int main(int argc, char **argv) {
         feature_pub.publish({feature, "SIM"});
 
         if (!no_actions) {
+            if (demo_mode && demo_sent >= demo_max_actions) {
+                continue;  // cap demo actions; still consume ticks for invariants/pending fills
+            }
             bool issued_demo = false;
             engine::Action action;
-            if (demo_notional > 0.0) {
+            if (demo_notional > 0.0 && demo_sent < demo_max_actions) {
                 if (last_demo_ts == 0 || (now_ts - last_demo_ts) >= demo_interval_ms) {
-                    last_demo_ts = now_ts;
-                    double ref_px = (replay.current_book().best_bid + replay.current_book().best_ask) / 2.0;
+                    double ref_px = replay.current_book().best_ask;
                     if (ref_px <= 0.0) {
-                        ref_px = replay.current_book().best_ask > 0.0 ? replay.current_book().best_ask
-                                                                     : replay.current_book().best_bid;
+                        ref_px = replay.current_book().best_bid;
                     }
-                    const double qty = (ref_px > 0.0) ? demo_notional / ref_px : 0.0;
-                    action.side = engine::Side::Buy;
-                    action.size = qty;
-                    action.notional = demo_notional;
-                    action.is_maker = false;
-                    issued_demo = true;
+                    if (ref_px <= 0.0 && replay.current_book().best_bid > 0.0 &&
+                        replay.current_book().best_ask > 0.0) {
+                        ref_px = (replay.current_book().best_bid + replay.current_book().best_ask) / 2.0;
+                    }
+                    if (ref_px <= 0.0) {
+                        continue;  // no valid reference price
+                    }
+                    const double qty = demo_notional / ref_px;
+                    if (qty > 0.0) {
+                        last_demo_ts = now_ts;
+                        action.side = engine::Side::Buy;
+                        action.size = qty;
+                        action.notional = demo_notional;
+                        action.is_maker = false;
+                        issued_demo = true;
+                    }
                 }
+            }
+            if (demo_notional > 0.0 && !issued_demo) {
+                // demo mode: skip other actions when not time yet
+                continue;
             }
             if (!issued_demo) {
                 action = decision_engine.decide(feature);
@@ -408,8 +452,12 @@ int main(int argc, char **argv) {
                 } else {
                     const double latency_ms = deterministic_latency_ms(symbol, action_seq, action_seq, latency_cfg);
                     const int64_t fill_ts = now_ts + static_cast<int64_t>(latency_ms);
-                    pending_actions.push(PendingAction{action, fill_ts, action_seq, action_seq});
+                    pending_actions.push(
+                        PendingAction{action, fill_ts, action_seq, action_seq, issued_demo, action.notional});
                     ++action_seq;
+                    if (issued_demo) {
+                        ++demo_sent;
+                    }
                 }
             }
         }
@@ -434,28 +482,47 @@ int main(int argc, char **argv) {
                                             risk_engine.position().qty *
                                                 (mark - risk_engine.position().avg_price);
                 const double gross_delta = new_mark_pnl - prev_mark_pnl;
-                    const double fee_rate = (fill.liquidity == engine::Liquidity::Maker) ? 0.0002 : 0.0006;
-                    const double notional = fill.vwap_price * fill.filled_qty;
-                    const double fee_paid = notional * fee_rate;
-                    const double fee_bps = notional > 0.0 ? (fee_paid / notional) * 1e4 : 0.0;
-                    pnl.gross += gross_delta;
-                    pnl.fees += fee_paid;
-                    const double net_delta = gross_delta - fee_paid;
+                const double fee_rate = (fill.liquidity == engine::Liquidity::Maker) ? 0.0002 : 0.0006;
+                const double notional = fill.vwap_price * fill.filled_qty;
+                const double target_notional = pending.target_notional;
+                if (target_notional > 0.0 && notional > target_notional * 1.001) {
+                    std::stringstream err;
+                    err << "[fee_sanity] filled_notional " << notional << " exceeds target " << target_notional;
+                    utils::error(err.str());
+                    std::exit(1);
+                }
+                const double fee_paid = notional * fee_rate;
+                const double fee_bps = notional > 0.0 ? (fee_paid / notional) * 1e4 : 0.0;
+                pnl.gross += gross_delta;
+                pnl.fees += fee_paid;
+                const double net_delta = gross_delta - fee_paid;
                 pnl.net_steps.push_back(net_delta);
                 const double mid = (replay.current_book().best_bid + replay.current_book().best_ask) / 2.0;
                 const double spread_paid_ticks = (mid > 0.0) ? std::abs(fill.vwap_price - mid) / tick_size : 0.0;
                 pnl.net_by_1s[(replay.current_book().ts_ms) / 1000] += net_delta;
                 pnl.net_by_10s[(replay.current_book().ts_ms) / 10000] += net_delta;
+                double best = (pending.action.side == engine::Side::Buy) ? replay.current_book().best_ask
+                                                                          : replay.current_book().best_bid;
+                double mid_to_best_ticks = (mid > 0.0 && best > 0.0) ? (mid - best) / tick_size : 0.0;
+                double exec_cost_ticks_signed = 0.0;
+                if (mid > 0.0) {
+                    exec_cost_ticks_signed = (pending.action.side == engine::Side::Buy)
+                                                 ? (fill.vwap_price - mid) / tick_size
+                                                 : (mid - fill.vwap_price) / tick_size;
+                }
                 std::stringstream ss;
                 ss << "fill side=" << static_cast<int>(fill.side) << " vwap=" << fill.vwap_price << " filled="
                    << fill.filled_qty << " unfilled=" << fill.unfilled_qty << " levels=" << fill.levels_crossed
                    << " slip_ticks=" << fill.slippage_ticks << " partial=" << (fill.partial ? 1 : 0)
                    << " spread_paid_ticks=" << spread_paid_ticks << " liq="
                    << (fill.liquidity == engine::Liquidity::Maker ? "M" : "T")
+                   << " src=" << (pending.demo ? "DEMO" : "STRAT") << " target_notional=" << target_notional
+                   << " filled_notional=" << notional << " best=" << best << " mid=" << mid
+                   << " mid_to_best_ticks=" << mid_to_best_ticks
+                   << " exec_cost_ticks_signed=" << exec_cost_ticks_signed
                    << " adv_ticks=" << (fill.liquidity == engine::Liquidity::Maker ? maker_params.adv_ticks : 0.0)
-                       << " notional=" << notional << " fee=" << fee_paid << " fee_bps=" << fee_bps
-                       << " gross=" << gross_delta << " net=" << net_delta
-                       << " fees_tot=" << pnl.fees << " net_tot=" << pnl.net();
+                   << " fee=" << fee_paid << " fee_bps=" << fee_bps << " gross=" << gross_delta << " net=" << net_delta
+                   << " fees_tot=" << pnl.fees << " net_tot=" << pnl.net();
                 bus.publish(engine::Event{engine::Event::Type::Fill, ss.str()});
                 utils::info(ss.str());
             }
