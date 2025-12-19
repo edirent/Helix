@@ -4,6 +4,7 @@
 /home/edirent/Helix/cpp_engine/build/CMakeFiles/test_replay.dir
 /home/edirent/Helix/cpp_engine/build/CMakeFiles/test_match.dir
 /home/edirent/Helix/cpp_engine/build/CMakeFiles/test_features.dir
+/home/edirent/Helix/cpp_engine/build/CMakeFiles/test_matching_conservation.dir
 /home/edirent/Helix/cpp_engine/build/CMakeFiles/test.dir
 /home/edirent/Helix/cpp_engine/build/CMakeFiles/edit_cache.dir
 /home/edirent/Helix/cpp_engine/build/CMakeFiles/rebuild_cache.dir

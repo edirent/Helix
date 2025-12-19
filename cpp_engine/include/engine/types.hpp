@@ -43,6 +43,7 @@ struct Action {
     double size{0.0};
     bool is_maker{false};
     double limit_price{0.0};  // optional, used for maker queue model
+    double notional{0.0};     // optional quote notional for fee/unit sanity
 };
 
 enum class Liquidity : uint8_t { Maker, Taker };

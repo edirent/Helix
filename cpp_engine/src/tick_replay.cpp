@@ -98,6 +98,8 @@ bool TickReplay::feed_next(EventBus &bus) {
         orderbook_ = snapshots_[cursor_++];
     }
 
+    check_invariants(orderbook_);
+
     std::stringstream ss;
     ss << "bid=" << orderbook_.best_bid << " ask=" << orderbook_.best_ask;
     Event evt;
@@ -389,6 +391,66 @@ void TickReplay::rebuild_snapshot_from_maps() {
         }
         ++it;
     }
+}
+
+bool TickReplay::check_invariants(const OrderbookSnapshot &book) {
+    ++invariant_checks_;
+    bool ok = true;
+
+    auto warn_once = [&](const std::string &msg) {
+        ++invariant_violations_;
+        if (invariant_violations_ <= 5) {
+            utils::warn("[TickReplay invariant] " + msg);
+        }
+    };
+
+    if (!(book.best_bid > 0.0 && book.best_ask > 0.0 && book.best_bid < book.best_ask)) {
+        warn_once("best_bid/best_ask invalid: " + std::to_string(book.best_bid) + " / " +
+                  std::to_string(book.best_ask));
+        ok = false;
+    }
+    if (!(book.bid_size > 0.0 && book.ask_size > 0.0)) {
+        warn_once("top sizes non-positive: " + std::to_string(book.bid_size) + " / " + std::to_string(book.ask_size));
+        ok = false;
+    }
+
+    auto is_strict_desc = [](const std::vector<PriceLevel> &lvls) {
+        for (std::size_t i = 1; i < lvls.size(); ++i) {
+            if (!(lvls[i - 1].price > lvls[i].price)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto is_strict_asc = [](const std::vector<PriceLevel> &lvls) {
+        for (std::size_t i = 1; i < lvls.size(); ++i) {
+            if (!(lvls[i - 1].price < lvls[i].price)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!book.bids.empty() && !is_strict_desc(book.bids)) {
+        warn_once("bids not strictly descending");
+        ok = false;
+    }
+    if (!book.asks.empty() && !is_strict_asc(book.asks)) {
+        warn_once("asks not strictly ascending");
+        ok = false;
+    }
+
+    const double mid = (book.best_bid + book.best_ask) / 2.0;
+    if (!(mid > 0.0) || std::isnan(mid) || std::isinf(mid)) {
+        warn_once("mid invalid: " + std::to_string(mid));
+        ok = false;
+    }
+
+    if (invariant_checks_ % 500 == 0) {
+        std::stringstream ss;
+        ss << "[TickReplay invariant] checks=" << invariant_checks_ << " violations=" << invariant_violations_;
+        utils::info(ss.str());
+    }
+    return ok;
 }
 
 }  // namespace helix::engine

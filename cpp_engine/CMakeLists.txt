@@ -36,3 +36,7 @@ add_test(NAME test_match COMMAND test_match)
 add_executable(test_features tests/test_features.cpp)
 target_link_libraries(test_features PRIVATE helix_engine)
 add_test(NAME test_features COMMAND test_features)
+
+add_executable(test_matching_conservation tests/test_matching_conservation.cpp)
+target_link_libraries(test_matching_conservation PRIVATE helix_engine)
+add_test(NAME test_matching_conservation COMMAND test_matching_conservation)

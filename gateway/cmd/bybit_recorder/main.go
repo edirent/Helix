@@ -33,11 +33,11 @@ const (
 	backoffMax  = 8 * time.Second
 
 	// Writer performance knobs
-	rowChanSize     = 8192
-	bufioSize       = 1 << 20 // 1MB
-	flushEveryN     = 200
-	flushEveryDur   = 500 * time.Millisecond
-	closeReasonDone = "done"
+	rowChanSize      = 8192
+	bufioSize        = 1 << 20 // 1MB
+	flushEveryN      = 200
+	flushEveryDur    = 500 * time.Millisecond
+	closeReasonDone  = "done"
 	closeReasonRetry = "reconnect"
 )
 
@@ -47,6 +47,9 @@ type orderbookMsg struct {
 	Ts    int64  `json:"ts"`
 	Data  struct {
 		Symbol string     `json:"s"`
+		Seq    int64      `json:"seq"`
+		U      int64      `json:"u"`
+		Pu     int64      `json:"pu"`
 		Bids   [][]string `json:"b"`
 		Asks   [][]string `json:"a"`
 	} `json:"data"`
@@ -65,18 +68,20 @@ type metaInfo struct {
 
 // 传给 writer 的最小数据结构：全部用原始 string，避免 float/format 成本
 type csvRow struct {
-	tsMs   int64
-	bidPx  string
-	askPx  string
-	bidQty string
-	askQty string
+	tsMs    int64
+	seq     int64
+	prevSeq int64
+	side    string
+	price   string
+	size    string
+	rowType string
 }
 
 func main() {
 	symbol := flag.String("symbol", "BTCUSDT", "Bybit symbol, e.g. BTCUSDT")
 	endpoint := flag.String("endpoint", "wss://stream.bybit.com/v5/public/linear", "Bybit public websocket endpoint")
 	depth := flag.Int("depth", 1, "Orderbook depth to subscribe (1 or 50)")
-	out := flag.String("out", "data/replay/bybit_ws.csv", "CSV file to write top-of-book snapshots")
+	out := flag.String("out", "data/replay/bybit_l2.csv", "CSV file to write L2 deltas (ts_ms,seq,prev_seq,book_side,price,size,type)")
 	duration := flag.Duration("duration", time.Minute, "How long to record before exiting")
 	flag.Parse()
 
@@ -197,27 +202,41 @@ func readLoop(ctx context.Context, endpoint, topic string, out chan<- csvRow) {
 				continue
 			}
 			// top-of-book requires [price, size]
-			if len(msg.Data.Bids[0]) < 2 || len(msg.Data.Asks[0]) < 2 {
-				continue
-			}
-
 			ts := msg.Ts
 			if ts == 0 {
 				ts = time.Now().UnixNano() / int64(time.Millisecond)
 			}
 
-			row := csvRow{
-				tsMs:   ts,
-				bidPx:  msg.Data.Bids[0][0], // 原始字符串
-				bidQty: msg.Data.Bids[0][1],
-				askPx:  msg.Data.Asks[0][0],
-				askQty: msg.Data.Asks[0][1],
+			seq := msg.Data.U
+			prev := msg.Data.Pu
+			if msg.Data.Seq != 0 {
+				seq = msg.Data.Seq
 			}
 
-			// 如果 writer 来不及写：这里会 backpressure（不会悄悄丢数据）
-			select {
-			case out <- row:
-			case <-ctx.Done():
+			emit := func(levels [][]string, side string) bool {
+				for _, lvl := range levels {
+					if len(lvl) < 2 {
+						continue
+					}
+					row := csvRow{
+						tsMs:    ts,
+						seq:     seq,
+						prevSeq: prev,
+						side:    side,
+						price:   lvl[0],
+						size:    lvl[1],
+						rowType: msg.Type,
+					}
+					select {
+					case out <- row:
+					case <-ctx.Done():
+						return false
+					}
+				}
+				return true
+			}
+
+			if !emit(msg.Data.Bids, "bid") || !emit(msg.Data.Asks, "ask") {
 				pingCancel()
 				_ = conn.Close(websocket.StatusNormalClosure, closeReasonDone)
 				return
@@ -234,7 +253,7 @@ func writerLoop(ctx context.Context, f *os.File, rows <-chan csvRow) uint64 {
 	w := csv.NewWriter(bw)
 	defer w.Flush()
 
-	if err := w.Write([]string{"ts_ms", "best_bid", "best_ask", "bid_size", "ask_size"}); err != nil {
+	if err := w.Write([]string{"ts_ms", "seq", "prev_seq", "book_side", "price", "size", "type"}); err != nil {
 		log.Fatalf("write header: %v", err)
 	}
 	w.Flush()
@@ -249,7 +268,7 @@ func writerLoop(ctx context.Context, f *os.File, rows <-chan csvRow) uint64 {
 	sinceFlush := 0
 
 	// 复用 slice，避免每行分配 []string
-	rec := make([]string, 5)
+	rec := make([]string, 7)
 
 	flush := func() {
 		w.Flush()
@@ -280,10 +299,12 @@ func writerLoop(ctx context.Context, f *os.File, rows <-chan csvRow) uint64 {
 			}
 
 			rec[0] = strconv.FormatInt(row.tsMs, 10)
-			rec[1] = row.bidPx
-			rec[2] = row.askPx
-			rec[3] = row.bidQty
-			rec[4] = row.askQty
+			rec[1] = strconv.FormatInt(row.seq, 10)
+			rec[2] = strconv.FormatInt(row.prevSeq, 10)
+			rec[3] = row.side
+			rec[4] = row.price
+			rec[5] = row.size
+			rec[6] = row.rowType
 
 			if err := w.Write(rec); err != nil {
 				log.Fatalf("write row: %v", err)

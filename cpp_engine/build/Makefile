@@ -204,6 +204,19 @@ test_features/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_features.dir/build.make CMakeFiles/test_features.dir/build
 .PHONY : test_features/fast
 
+#=============================================================================
+# Target rules for targets named test_matching_conservation
+
+# Build rule for target.
+test_matching_conservation: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_matching_conservation
+.PHONY : test_matching_conservation
+
+# fast build rule for target.
+test_matching_conservation/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matching_conservation.dir/build.make CMakeFiles/test_matching_conservation.dir/build
+.PHONY : test_matching_conservation/fast
+
 src/decision_engine.o: src/decision_engine.cpp.o
 .PHONY : src/decision_engine.o
 
@@ -492,6 +505,30 @@ tests/test_match.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_match.dir/build.make CMakeFiles/test_match.dir/tests/test_match.cpp.s
 .PHONY : tests/test_match.cpp.s
 
+tests/test_matching_conservation.o: tests/test_matching_conservation.cpp.o
+.PHONY : tests/test_matching_conservation.o
+
+# target to build an object file
+tests/test_matching_conservation.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matching_conservation.dir/build.make CMakeFiles/test_matching_conservation.dir/tests/test_matching_conservation.cpp.o
+.PHONY : tests/test_matching_conservation.cpp.o
+
+tests/test_matching_conservation.i: tests/test_matching_conservation.cpp.i
+.PHONY : tests/test_matching_conservation.i
+
+# target to preprocess a source file
+tests/test_matching_conservation.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matching_conservation.dir/build.make CMakeFiles/test_matching_conservation.dir/tests/test_matching_conservation.cpp.i
+.PHONY : tests/test_matching_conservation.cpp.i
+
+tests/test_matching_conservation.s: tests/test_matching_conservation.cpp.s
+.PHONY : tests/test_matching_conservation.s
+
+# target to generate assembly for a file
+tests/test_matching_conservation.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matching_conservation.dir/build.make CMakeFiles/test_matching_conservation.dir/tests/test_matching_conservation.cpp.s
+.PHONY : tests/test_matching_conservation.cpp.s
+
 tests/test_replay.o: tests/test_replay.cpp.o
 .PHONY : tests/test_replay.o
 
@@ -530,6 +567,7 @@ help:
 	@echo "... helix_engine_main"
 	@echo "... test_features"
 	@echo "... test_match"
+	@echo "... test_matching_conservation"
 	@echo "... test_replay"
 	@echo "... src/decision_engine.o"
 	@echo "... src/decision_engine.i"
@@ -567,6 +605,9 @@ help:
 	@echo "... tests/test_match.o"
 	@echo "... tests/test_match.i"
 	@echo "... tests/test_match.s"
+	@echo "... tests/test_matching_conservation.o"
+	@echo "... tests/test_matching_conservation.i"
+	@echo "... tests/test_matching_conservation.s"
 	@echo "... tests/test_replay.o"
 	@echo "... tests/test_replay.i"
 	@echo "... tests/test_replay.s"

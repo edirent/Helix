@@ -46,4 +46,5 @@ set(CMAKE_DEPEND_INFO_FILES
   "CMakeFiles/test_replay.dir/DependInfo.cmake"
   "CMakeFiles/test_match.dir/DependInfo.cmake"
   "CMakeFiles/test_features.dir/DependInfo.cmake"
+  "CMakeFiles/test_matching_conservation.dir/DependInfo.cmake"
   )

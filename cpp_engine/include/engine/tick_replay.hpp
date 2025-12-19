@@ -38,6 +38,7 @@ class TickReplay {
     bool parse_line_fields(const std::string &line, std::vector<std::string> &out_fields) const;
     bool apply_next_delta();
     void rebuild_snapshot_from_maps();
+    bool check_invariants(const OrderbookSnapshot &book);
 
     std::filesystem::path source_;
     std::vector<OrderbookSnapshot> snapshots_;
@@ -47,6 +48,8 @@ class TickReplay {
     int64_t last_seq_{-1};
     int64_t last_ts_ms_{0};
     bool using_deltas_{false};
+    std::size_t invariant_checks_{0};
+    std::size_t invariant_violations_{0};
     std::map<double, double, std::greater<double>> bids_;
     std::map<double, double, std::less<double>> asks_;
     OrderbookSnapshot orderbook_;
