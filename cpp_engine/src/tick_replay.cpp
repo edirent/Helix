@@ -1,7 +1,9 @@
 #include "engine/tick_replay.hpp"
 
-#include <cstdlib>
 #include <cmath>
+#include <cstdlib>
+#include <deque>
+#include <fstream>
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -99,6 +101,7 @@ bool TickReplay::feed_next(EventBus &bus) {
     }
 
     check_invariants(orderbook_);
+    maybe_write_bookcheck();
 
     std::stringstream ss;
     ss << "bid=" << orderbook_.best_bid << " ask=" << orderbook_.best_ask;
@@ -355,6 +358,11 @@ bool TickReplay::apply_next_delta() {
     }
 
     rebuild_snapshot_from_maps();
+    recent_deltas_.push_back(d);
+    constexpr std::size_t kKeep = 10;
+    if (recent_deltas_.size() > kKeep) {
+        recent_deltas_.pop_front();
+    }
     return true;
 }
 
@@ -366,6 +374,8 @@ void TickReplay::rebuild_snapshot_from_maps() {
     orderbook_.best_ask = 0.0;
     orderbook_.bid_size = 0.0;
     orderbook_.ask_size = 0.0;
+    orderbook_.bids.clear();
+    orderbook_.asks.clear();
 
     for (auto it = bids_.begin(); it != bids_.end();) {
         if (it->second <= 0.0) {
@@ -399,9 +409,7 @@ bool TickReplay::check_invariants(const OrderbookSnapshot &book) {
 
     auto warn_once = [&](const std::string &msg) {
         ++invariant_violations_;
-        if (invariant_violations_ <= 5) {
-            utils::warn("[TickReplay invariant] " + msg);
-        }
+        utils::error("[TickReplay invariant] " + msg);
     };
 
     if (!(book.best_bid > 0.0 && book.best_ask > 0.0 && book.best_bid < book.best_ask)) {
@@ -445,12 +453,45 @@ bool TickReplay::check_invariants(const OrderbookSnapshot &book) {
         ok = false;
     }
 
-    if (invariant_checks_ % 500 == 0) {
-        std::stringstream ss;
-        ss << "[TickReplay invariant] checks=" << invariant_checks_ << " violations=" << invariant_violations_;
-        utils::info(ss.str());
+    if (!ok) {
+        utils::error("[TickReplay invariant] fatal, dumping recent deltas (newest last)");
+        for (const auto &d : recent_deltas_) {
+            std::stringstream ss;
+            ss << "delta seq=" << d.seq << " prev=" << d.prev_seq << " ts=" << d.ts_ms << " side="
+               << (d.side == Side::Buy ? "B" : "S") << " px=" << d.price << " qty=" << d.qty
+               << " snap=" << (d.snapshot ? 1 : 0);
+            utils::error(ss.str());
+        }
+        std::exit(1);
     }
     return ok;
+}
+
+void TickReplay::enable_bookcheck(const std::filesystem::path &path, std::size_t interval) {
+    bookcheck_interval_ = interval;
+    bookcheck_counter_ = 0;
+    bookcheck_out_.open(path);
+    if (bookcheck_out_.is_open()) {
+        bookcheck_out_ << "ts_ms,seq,best_bid,best_ask,bid_size,ask_size\n";
+    } else {
+        utils::warn("TickReplay failed to open bookcheck file: " + path.string());
+        bookcheck_interval_ = 0;
+    }
+}
+
+void TickReplay::maybe_write_bookcheck() {
+    if (bookcheck_interval_ == 0 || !bookcheck_out_.is_open()) {
+        return;
+    }
+    ++bookcheck_counter_;
+    const bool snapshot_mode = !using_deltas_;
+    const std::size_t stride = bookcheck_interval_;
+    if ((bookcheck_counter_ % stride) != 0) {
+        return;
+    }
+    const int64_t seq = snapshot_mode ? static_cast<int64_t>(bookcheck_counter_) : last_seq_;
+    bookcheck_out_ << orderbook_.ts_ms << "," << seq << "," << orderbook_.best_bid << "," << orderbook_.best_ask
+                   << "," << orderbook_.bid_size << "," << orderbook_.ask_size << "\n";
 }
 
 }  // namespace helix::engine

@@ -10,9 +10,12 @@
 #include <vector>
 
 #include "engine/decision_engine.hpp"
+#include "engine/latency.hpp"
 #include "engine/event_bus.hpp"
 #include "engine/feature_engine.hpp"
 #include "engine/matching_engine.hpp"
+#include "engine/order_utils.hpp"
+#include "engine/maker_queue.hpp"
 #include "engine/recorder.hpp"
 #include "engine/risk_engine.hpp"
 #include "engine/tick_replay.hpp"
@@ -23,13 +26,6 @@
 using namespace helix;
 
 namespace {
-struct LatencyConfig {
-    double base_ms{8.0};
-    double jitter_ms{4.0};
-    double tail_ms{12.0};
-    double tail_prob{0.02};
-};
-
 struct PendingAction {
     engine::Action action;
     int64_t fill_ts{0};
@@ -37,6 +33,7 @@ struct PendingAction {
     uint64_t action_idx{0};
     bool demo{false};
     double target_notional{0.0};
+    bool crossing{false};
 };
 
 struct PnLAggregate {
@@ -46,177 +43,35 @@ struct PnLAggregate {
     std::map<int64_t, double> net_by_1s;
     std::map<int64_t, double> net_by_10s;
     double net() const { return gross - fees; }
-    static double sharpe_from_buckets(const std::map<int64_t, double> &buckets) {
-        if (buckets.empty()) {
-            return 0.0;
+    struct SharpeStats {
+        double mean{0.0};
+        double std{0.0};
+        std::size_t n{0};
+        double sharpe{0.0};
+    };
+    static SharpeStats sharpe_from_buckets(const std::map<int64_t, double> &buckets) {
+        SharpeStats s;
+        s.n = buckets.size();
+        if (s.n < 2) {
+            return s;  // insufficient data; sharpe left as 0
         }
-        double mean = 0.0;
         for (const auto &kv : buckets) {
-            mean += kv.second;
+            s.mean += kv.second;
         }
-        mean /= static_cast<double>(buckets.size());
+        s.mean /= static_cast<double>(s.n);
         double var = 0.0;
         for (const auto &kv : buckets) {
-            const double diff = kv.second - mean;
+            const double diff = kv.second - s.mean;
             var += diff * diff;
         }
-        var /= static_cast<double>(buckets.size());
-        const double stddev = std::sqrt(var) + 1e-9;
-        return mean / stddev * std::sqrt(static_cast<double>(buckets.size()));
+        var /= static_cast<double>(s.n - 1);
+        s.std = std::sqrt(var);
+        if (s.std > 1e-9) {
+            s.sharpe = s.mean / s.std * std::sqrt(static_cast<double>(s.n));
+        }
+        return s;
     }
 };
-
-struct MakerParams {
-    double q_init{0.8};
-    double alpha{0.6};
-    int64_t expire_ms{200};
-    double adv_ticks{2.0};
-};
-
-struct RestingOrder {
-    engine::Action action;
-    double price{0.0};
-    double queue_ahead{0.0};
-    double my_qty{0.0};
-    int64_t submit_ts{0};
-    int64_t expire_ts{0};
-};
-
-class MakerQueueSim {
-  public:
-    explicit MakerQueueSim(MakerParams params, double tick_size)
-        : params_(params), tick_size_(tick_size) {}
-
-    void submit(const engine::Action &action, const engine::OrderbookSnapshot &book, int64_t now_ts) {
-        RestingOrder ord;
-        ord.action = action;
-        ord.price = (action.limit_price > 0.0) ? action.limit_price
-                                               : (action.side == engine::Side::Buy ? book.best_bid : book.best_ask);
-        ord.my_qty = action.size;
-        ord.submit_ts = now_ts;
-        ord.expire_ts = now_ts + params_.expire_ms;
-        ord.queue_ahead = level_qty(book, ord.price, action.side) * params_.q_init;
-        orders_.push_back(ord);
-    }
-
-    std::vector<engine::Fill> on_book(const engine::OrderbookSnapshot &book, int64_t now_ts) {
-        std::vector<engine::Fill> fills;
-        update_level_maps(book);
-
-        std::vector<RestingOrder> remaining;
-        remaining.reserve(orders_.size());
-        for (auto &ord : orders_) {
-            const double prev_qty = last_level_qty(ord.price, ord.action.side);
-            const double curr_qty = current_level_qty(ord.price, ord.action.side);
-            const double delta_down = std::max(0.0, prev_qty - curr_qty);
-
-            if (delta_down > 0.0 && ord.my_qty > 0.0) {
-                const double consume_ahead = std::min(ord.queue_ahead, delta_down * params_.alpha);
-                ord.queue_ahead -= consume_ahead;
-                const double remaining_delta = delta_down - consume_ahead;
-                const double fill_qty = std::min(ord.my_qty, remaining_delta);
-                ord.my_qty -= fill_qty;
-                if (fill_qty > 0.0) {
-                    engine::Fill f = engine::Fill::filled(ord.action.side, ord.price, fill_qty,
-                                                          ord.my_qty > 0.0, engine::Liquidity::Maker);
-                    // Adverse selection penalty: shift fill price against us by adv_ticks.
-                    const double penalty = params_.adv_ticks * tick_size_;
-                    if (ord.action.side == engine::Side::Buy) {
-                        f.price += penalty;
-                        f.vwap_price += penalty;
-                    } else {
-                        f.price -= penalty;
-                        f.vwap_price -= penalty;
-                    }
-                    f.unfilled_qty = ord.my_qty;
-                    f.levels_crossed = 1;
-                    f.slippage_ticks = 0.0;
-                    fills.push_back(f);
-                }
-            }
-
-            if (ord.my_qty > 0.0 && now_ts >= ord.expire_ts) {
-                // expire/cancel remaining
-                continue;
-            }
-            if (ord.my_qty > 0.0) {
-                remaining.push_back(ord);
-            }
-        }
-
-        orders_.swap(remaining);
-        last_bids_ = curr_bids_;
-        last_asks_ = curr_asks_;
-        return fills;
-    }
-
-  private:
-    double level_qty(const engine::OrderbookSnapshot &book, double price, engine::Side side) const {
-        const auto &levels = (side == engine::Side::Buy) ? book.bids : book.asks;
-        for (const auto &lvl : levels) {
-            if (std::abs(lvl.price - price) < 1e-9) {
-                return lvl.qty;
-            }
-        }
-        if (side == engine::Side::Buy && std::abs(price - book.best_bid) < 1e-9) {
-            return book.bid_size;
-        }
-        if (side == engine::Side::Sell && std::abs(price - book.best_ask) < 1e-9) {
-            return book.ask_size;
-        }
-        return 0.0;
-    }
-
-    void update_level_maps(const engine::OrderbookSnapshot &book) {
-        curr_bids_.clear();
-        curr_asks_.clear();
-        for (const auto &lvl : book.bids) {
-            curr_bids_[lvl.price] = lvl.qty;
-        }
-        for (const auto &lvl : book.asks) {
-            curr_asks_[lvl.price] = lvl.qty;
-        }
-    }
-
-    double current_level_qty(double price, engine::Side side) const {
-        if (side == engine::Side::Buy) {
-            auto it = curr_bids_.find(price);
-            return it == curr_bids_.end() ? 0.0 : it->second;
-        }
-        auto it = curr_asks_.find(price);
-        return it == curr_asks_.end() ? 0.0 : it->second;
-    }
-
-    double last_level_qty(double price, engine::Side side) const {
-        if (side == engine::Side::Buy) {
-            auto it = last_bids_.find(price);
-            return it == last_bids_.end() ? current_level_qty(price, side) : it->second;
-        }
-        auto it = last_asks_.find(price);
-        return it == last_asks_.end() ? current_level_qty(price, side) : it->second;
-    }
-
-    MakerParams params_;
-    std::vector<RestingOrder> orders_;
-    std::map<double, double, std::greater<double>> last_bids_;
-    std::map<double, double, std::less<double>> last_asks_;
-    std::map<double, double, std::greater<double>> curr_bids_;
-    std::map<double, double, std::less<double>> curr_asks_;
-    double tick_size_{0.0};
-};
-
-double deterministic_latency_ms(const std::string &symbol, uint64_t seq, uint64_t action_idx, const LatencyConfig &cfg) {
-    std::string seed_input = symbol + "#" + std::to_string(seq) + "#" + std::to_string(action_idx);
-    std::size_t seed_val = std::hash<std::string>{}(seed_input);
-    std::mt19937_64 rng(static_cast<uint64_t>(seed_val));
-    std::uniform_real_distribution<double> jitter_dist(0.0, cfg.jitter_ms);
-    std::uniform_real_distribution<double> u01(0.0, 1.0);
-    double lat = cfg.base_ms + jitter_dist(rng);
-    if (u01(rng) < cfg.tail_prob) {
-        lat += cfg.tail_ms;
-    }
-    return lat;
-}
 
 struct PendingComparator {
     bool operator()(const PendingAction &a, const PendingAction &b) const { return a.fill_ts > b.fill_ts; }
@@ -229,6 +84,8 @@ int main(int argc, char **argv) {
     double demo_notional = 0.0;
     int64_t demo_interval_ms = 500;
     int demo_max_actions = 30;
+    std::string replay_bookcheck_path;
+    std::size_t replay_bookcheck_every = 0;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--no_actions") {
@@ -239,6 +96,10 @@ int main(int argc, char **argv) {
             demo_interval_ms = std::stoll(argv[++i]);
         } else if (arg == "--demo_max" && i + 1 < argc) {
             demo_max_actions = std::stoi(argv[++i]);
+        } else if (arg == "--bookcheck" && i + 1 < argc) {
+            replay_bookcheck_path = argv[++i];
+        } else if (arg == "--bookcheck_every" && i + 1 < argc) {
+            replay_bookcheck_every = static_cast<std::size_t>(std::stoull(argv[++i]));
         } else if (replay_source == "data/replay/synthetic.csv") {
             replay_source = arg;
         } else {
@@ -249,6 +110,9 @@ int main(int argc, char **argv) {
     engine::EventBus bus(64);
     engine::TickReplay replay;
     replay.load_file(replay_source);
+    if (!replay_bookcheck_path.empty() && replay_bookcheck_every > 0) {
+        replay.enable_bookcheck(replay_bookcheck_path, replay_bookcheck_every);
+    }
 
     engine::FeatureEngine feature_engine;
     engine::DecisionEngine decision_engine;
@@ -258,12 +122,12 @@ int main(int argc, char **argv) {
     engine::MatchingEngine matching_engine(symbol, tick_size);
     engine::Recorder recorder("engine_events.log");
     engine::TradeTape tape{100.0, 1.0};
-    LatencyConfig latency_cfg;
+    engine::LatencyConfig latency_cfg;
     uint64_t action_seq = 0;
     std::priority_queue<PendingAction, std::vector<PendingAction>, PendingComparator> pending_actions;
     PnLAggregate pnl;
-    MakerParams maker_params{};
-    MakerQueueSim maker_sim(maker_params, tick_size);
+    engine::MakerParams maker_params{};
+    engine::MakerQueueSim maker_sim(maker_params, tick_size);
     int64_t last_demo_ts = 0;
     int demo_sent = 0;
     const bool demo_mode = demo_notional > 0.0;
@@ -389,6 +253,7 @@ int main(int argc, char **argv) {
                        << " liq=" << (fill.liquidity == engine::Liquidity::Maker ? "M" : "T")
                        << " src=" << (pending.demo ? "DEMO" : "STRAT")
                        << " target_notional=" << target_notional << " filled_notional=" << notional
+                       << " crossing=" << (pending.crossing ? 1 : 0)
                        << " best=" << best << " mid=" << mid << " mid_to_best_ticks=" << mid_to_best_ticks
                        << " exec_cost_ticks_signed=" << exec_cost_ticks_signed
                        << " adv_ticks=" << (fill.liquidity == engine::Liquidity::Maker ? maker_params.adv_ticks : 0.0)
@@ -447,13 +312,18 @@ int main(int argc, char **argv) {
                 action = decision_engine.decide(feature);
             }
             if (risk_engine.validate(action, replay.current_book().best_ask)) {
+                const bool crossing = engine::is_crossing_limit(action, replay.current_book());
+                if (crossing) {
+                    action.is_maker = false;
+                }
                 if (action.is_maker) {
                     maker_sim.submit(action, replay.current_book(), now_ts);
                 } else {
-                    const double latency_ms = deterministic_latency_ms(symbol, action_seq, action_seq, latency_cfg);
+                    const double latency_ms =
+                        engine::deterministic_latency_ms(symbol, action_seq, action_seq, latency_cfg);
                     const int64_t fill_ts = now_ts + static_cast<int64_t>(latency_ms);
                     pending_actions.push(
-                        PendingAction{action, fill_ts, action_seq, action_seq, issued_demo, action.notional});
+                        PendingAction{action, fill_ts, action_seq, action_seq, issued_demo, action.notional, crossing});
                     ++action_seq;
                     if (issued_demo) {
                         ++demo_sent;
@@ -511,13 +381,13 @@ int main(int argc, char **argv) {
                                                  : (mid - fill.vwap_price) / tick_size;
                 }
                 std::stringstream ss;
-                ss << "fill side=" << static_cast<int>(fill.side) << " vwap=" << fill.vwap_price << " filled="
-                   << fill.filled_qty << " unfilled=" << fill.unfilled_qty << " levels=" << fill.levels_crossed
-                   << " slip_ticks=" << fill.slippage_ticks << " partial=" << (fill.partial ? 1 : 0)
-                   << " spread_paid_ticks=" << spread_paid_ticks << " liq="
-                   << (fill.liquidity == engine::Liquidity::Maker ? "M" : "T")
+                   ss << "fill side=" << static_cast<int>(fill.side) << " vwap=" << fill.vwap_price << " filled="
+                       << fill.filled_qty << " unfilled=" << fill.unfilled_qty << " levels=" << fill.levels_crossed
+                       << " slip_ticks=" << fill.slippage_ticks << " partial=" << (fill.partial ? 1 : 0)
+                       << " spread_paid_ticks=" << spread_paid_ticks << " liq="
+                       << (fill.liquidity == engine::Liquidity::Maker ? "M" : "T")
                    << " src=" << (pending.demo ? "DEMO" : "STRAT") << " target_notional=" << target_notional
-                   << " filled_notional=" << notional << " best=" << best << " mid=" << mid
+                   << " filled_notional=" << notional << " crossing=" << (pending.crossing ? 1 : 0) << " best=" << best << " mid=" << mid
                    << " mid_to_best_ticks=" << mid_to_best_ticks
                    << " exec_cost_ticks_signed=" << exec_cost_ticks_signed
                    << " adv_ticks=" << (fill.liquidity == engine::Liquidity::Maker ? maker_params.adv_ticks : 0.0)
@@ -542,8 +412,10 @@ int main(int argc, char **argv) {
     if (std::abs(pnl.gross) > 1e-9) {
         summary << " fee_ratio=" << (pnl.fees / pnl.gross);
     }
-    summary << " net_sharpe_1s=" << PnLAggregate::sharpe_from_buckets(pnl.net_by_1s)
-            << " net_sharpe_10s=" << PnLAggregate::sharpe_from_buckets(pnl.net_by_10s);
+    auto s1 = PnLAggregate::sharpe_from_buckets(pnl.net_by_1s);
+    auto s10 = PnLAggregate::sharpe_from_buckets(pnl.net_by_10s);
+    summary << " net_sharpe_1s=" << s1.sharpe << " n1s=" << s1.n << " std1s=" << s1.std
+            << " net_sharpe_10s=" << s10.sharpe << " n10s=" << s10.n << " std10s=" << s10.std;
     utils::info(summary.str());
 
     recorder.flush();

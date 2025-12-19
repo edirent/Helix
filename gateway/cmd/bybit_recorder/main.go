@@ -34,6 +34,7 @@ const (
 
 	// Writer performance knobs
 	rowChanSize      = 8192
+	bookCheckChan    = 512
 	bufioSize        = 1 << 20 // 1MB
 	flushEveryN      = 200
 	flushEveryDur    = 500 * time.Millisecond
@@ -77,12 +78,23 @@ type csvRow struct {
 	rowType string
 }
 
+type bookCheckRow struct {
+	tsMs    int64
+	seq     int64
+	bestBid float64
+	bestAsk float64
+	bidSz   float64
+	askSz   float64
+}
+
 func main() {
 	symbol := flag.String("symbol", "BTCUSDT", "Bybit symbol, e.g. BTCUSDT")
 	endpoint := flag.String("endpoint", "wss://stream.bybit.com/v5/public/linear", "Bybit public websocket endpoint")
 	depth := flag.Int("depth", 1, "Orderbook depth to subscribe (1 or 50)")
 	out := flag.String("out", "data/replay/bybit_l2.csv", "CSV file to write L2 deltas (ts_ms,seq,prev_seq,book_side,price,size,type)")
 	duration := flag.Duration("duration", time.Minute, "How long to record before exiting")
+	bookcheck := flag.String("bookcheck", "", "Optional path to write sampled top-of-book for determinism check")
+	bookcheckEvery := flag.Int("bookcheck_every", 100, "Sample every N messages into bookcheck (only if --bookcheck set)")
 	flag.Parse()
 
 	// Ctrl+C support
@@ -127,6 +139,7 @@ func main() {
 
 	// Channel: reader -> writer
 	rowCh := make(chan csvRow, rowChanSize)
+	bcCh := make(chan bookCheckRow, bookCheckChan)
 
 	// Start writer goroutine
 	var rowsWritten uint64
@@ -137,14 +150,61 @@ func main() {
 		atomic.StoreUint64(&rowsWritten, n)
 	}()
 
+	// bookcheck writer if requested
+	if *bookcheck != "" {
+		bcPath := *bookcheck
+		bcF, err := os.Create(bcPath)
+		if err != nil {
+			log.Fatalf("open bookcheck: %v", err)
+		}
+		go func() {
+			defer bcF.Close()
+			bw := bufio.NewWriterSize(bcF, bufioSize)
+			w := csv.NewWriter(bw)
+			w.Write([]string{"ts_ms", "seq", "best_bid", "best_ask", "bid_size", "ask_size"})
+			w.Flush()
+			ticker := time.NewTicker(flushEveryDur)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-runCtx.Done():
+					w.Flush()
+					bw.Flush()
+					return
+				case row, ok := <-bcCh:
+					if !ok {
+						w.Flush()
+						bw.Flush()
+						return
+					}
+					rec := []string{
+						strconv.FormatInt(row.tsMs, 10),
+						strconv.FormatInt(row.seq, 10),
+						fmt.Sprintf("%.10f", row.bestBid),
+						fmt.Sprintf("%.10f", row.bestAsk),
+						fmt.Sprintf("%.10f", row.bidSz),
+						fmt.Sprintf("%.10f", row.askSz),
+					}
+					if err := w.Write(rec); err != nil {
+						log.Printf("bookcheck write err: %v", err)
+					}
+				case <-ticker.C:
+					w.Flush()
+					bw.Flush()
+				}
+			}
+		}()
+	}
+
 	log.Printf("recording %s (%s), depth=%d, out=%s",
 		*symbol, *endpoint, *depth, *out)
 
 	// Start reader loop (handles reconnect + subscribe)
-	readLoop(runCtx, *endpoint, topic, rowCh)
+	readLoop(runCtx, *endpoint, topic, rowCh, bcCh, *bookcheckEvery, *bookcheck != "")
 
 	// Reader is done => close channel so writer can drain and exit
 	close(rowCh)
+	close(bcCh)
 	<-writerDone
 
 	elapsed := time.Since(startWall).Truncate(time.Second)
@@ -153,9 +213,40 @@ func main() {
 }
 
 // 读/解析 + 重连：只做网络和 JSON，写盘完全交给 writer
-func readLoop(ctx context.Context, endpoint, topic string, out chan<- csvRow) {
+func readLoop(ctx context.Context, endpoint, topic string, out chan<- csvRow, bc chan<- bookCheckRow, bcEvery int, enableBC bool) {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	attempt := 0
+	bids := map[float64]float64{}
+	asks := map[float64]float64{}
+	msgCount := 0
+
+	resetBook := func() {
+		bids = map[float64]float64{}
+		asks = map[float64]float64{}
+	}
+
+	getTop := func() (bestBid, bidSz, bestAsk, askSz float64) {
+		for px, sz := range bids {
+			if sz <= 0 {
+				continue
+			}
+			if px > bestBid {
+				bestBid = px
+				bidSz = sz
+			}
+		}
+		bestAsk = 0
+		for px, sz := range asks {
+			if sz <= 0 {
+				continue
+			}
+			if bestAsk == 0 || px < bestAsk {
+				bestAsk = px
+				askSz = sz
+			}
+		}
+		return
+	}
 
 	for {
 		if ctx.Err() != nil {
@@ -198,7 +289,7 @@ func readLoop(ctx context.Context, endpoint, topic string, out chan<- csvRow) {
 			if err := json.Unmarshal(data, &msg); err != nil {
 				continue
 			}
-			if len(msg.Data.Bids) == 0 || len(msg.Data.Asks) == 0 {
+			if len(msg.Data.Bids) == 0 && len(msg.Data.Asks) == 0 {
 				continue
 			}
 			// top-of-book requires [price, size]
@@ -218,6 +309,21 @@ func readLoop(ctx context.Context, endpoint, topic string, out chan<- csvRow) {
 					if len(lvl) < 2 {
 						continue
 					}
+					px, _ := strconv.ParseFloat(lvl[0], 64)
+					qty, _ := strconv.ParseFloat(lvl[1], 64)
+					if side == "bid" {
+						if qty <= 0 {
+							delete(bids, px)
+						} else {
+							bids[px] = qty
+						}
+					} else {
+						if qty <= 0 {
+							delete(asks, px)
+						} else {
+							asks[px] = qty
+						}
+					}
 					row := csvRow{
 						tsMs:    ts,
 						seq:     seq,
@@ -236,10 +342,23 @@ func readLoop(ctx context.Context, endpoint, topic string, out chan<- csvRow) {
 				return true
 			}
 
+			if msg.Type == "snapshot" {
+				resetBook()
+			}
+
 			if !emit(msg.Data.Bids, "bid") || !emit(msg.Data.Asks, "ask") {
 				pingCancel()
 				_ = conn.Close(websocket.StatusNormalClosure, closeReasonDone)
 				return
+			}
+
+			msgCount++
+			if enableBC && bcEvery > 0 && msgCount%bcEvery == 0 {
+				bestBid, bidSz, bestAsk, askSz := getTop()
+				select {
+				case bc <- bookCheckRow{tsMs: ts, seq: seq, bestBid: bestBid, bestAsk: bestAsk, bidSz: bidSz, askSz: askSz}:
+				default:
+				}
 			}
 		}
 	}

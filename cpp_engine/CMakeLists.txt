@@ -12,6 +12,7 @@ add_library(helix_engine
     src/decision_engine.cpp
     src/risk_engine.cpp
     src/matching_engine.cpp
+    src/maker_queue.cpp
     src/recorder.cpp
     src/transport_servers.cpp
 )
@@ -40,3 +41,39 @@ add_test(NAME test_features COMMAND test_features)
 add_executable(test_matching_conservation tests/test_matching_conservation.cpp)
 target_link_libraries(test_matching_conservation PRIVATE helix_engine)
 add_test(NAME test_matching_conservation COMMAND test_matching_conservation)
+
+add_executable(test_latency_causality tests/test_latency_causality.cpp)
+target_link_libraries(test_latency_causality PRIVATE helix_engine)
+add_test(NAME test_latency_causality COMMAND test_latency_causality)
+
+add_executable(test_depth_behaviour tests/test_depth_behaviour.cpp)
+target_link_libraries(test_depth_behaviour PRIVATE helix_engine)
+add_test(NAME test_depth_behaviour COMMAND test_depth_behaviour)
+
+add_executable(test_maker_queue tests/test_maker_queue.cpp)
+target_link_libraries(test_maker_queue PRIVATE helix_engine)
+add_test(NAME test_maker_queue COMMAND test_maker_queue)
+
+add_executable(test_matching_fuzz tests/test_matching_fuzz.cpp)
+target_link_libraries(test_matching_fuzz PRIVATE helix_engine)
+add_test(NAME test_matching_fuzz COMMAND test_matching_fuzz)
+
+add_executable(test_crossing_classification tests/test_crossing_classification.cpp)
+target_link_libraries(test_crossing_classification PRIVATE helix_engine)
+add_test(NAME test_crossing_classification COMMAND test_crossing_classification)
+
+add_executable(test_crossing_equals_taker tests/test_crossing_equals_taker.cpp)
+target_link_libraries(test_crossing_equals_taker PRIVATE helix_engine)
+add_test(NAME test_crossing_equals_taker COMMAND test_crossing_equals_taker)
+
+add_executable(test_pnl_bookkeeping tests/test_pnl_bookkeeping.cpp)
+target_link_libraries(test_pnl_bookkeeping PRIVATE helix_engine)
+add_test(NAME test_pnl_bookkeeping COMMAND test_pnl_bookkeeping)
+
+add_executable(test_exec_cost_identity tests/test_exec_cost_identity.cpp)
+target_link_libraries(test_exec_cost_identity PRIVATE helix_engine)
+add_test(NAME test_exec_cost_identity COMMAND test_exec_cost_identity)
+
+add_executable(test_deterministic_hash tests/test_deterministic_hash.cpp)
+target_link_libraries(test_deterministic_hash PRIVATE helix_engine)
+add_test(NAME test_deterministic_hash COMMAND test_deterministic_hash)

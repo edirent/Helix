@@ -4,6 +4,8 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <deque>
+#include <fstream>
 
 #include "engine/event_bus.hpp"
 #include "engine/types.hpp"
@@ -27,6 +29,7 @@ class TickReplay {
     void load_file(const std::filesystem::path &path);
     bool feed_next(EventBus &bus);
     bool finished() const;
+    void enable_bookcheck(const std::filesystem::path &path, std::size_t interval = 100);
 
     const OrderbookSnapshot &current_book() const { return orderbook_; }
 
@@ -39,6 +42,7 @@ class TickReplay {
     bool apply_next_delta();
     void rebuild_snapshot_from_maps();
     bool check_invariants(const OrderbookSnapshot &book);
+    void maybe_write_bookcheck();
 
     std::filesystem::path source_;
     std::vector<OrderbookSnapshot> snapshots_;
@@ -53,6 +57,10 @@ class TickReplay {
     std::map<double, double, std::greater<double>> bids_;
     std::map<double, double, std::less<double>> asks_;
     OrderbookSnapshot orderbook_;
+    std::deque<BookDelta> recent_deltas_;
+    std::ofstream bookcheck_out_;
+    std::size_t bookcheck_interval_{0};
+    std::size_t bookcheck_counter_{0};
 };
 
 }  // namespace helix::engine
