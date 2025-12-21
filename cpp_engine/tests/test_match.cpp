@@ -14,7 +14,9 @@ int main() {
     book.best_bid = book.bids.front().price;
     book.bid_size = book.bids.front().qty;
 
-    helix::engine::Action buy{helix::engine::Side::Buy, 2.5};
+    helix::engine::Action buy;
+    buy.side = helix::engine::Side::Buy;
+    buy.size = 2.5;
     auto fill_buy = matcher.simulate(buy, book);
     assert(fill_buy.status == helix::engine::FillStatus::Filled);
     assert(std::abs(fill_buy.vwap_price - 101.3) < 1e-6);
@@ -24,7 +26,9 @@ int main() {
     assert(fill_buy.unfilled_qty == 0.0);
     assert(fill_buy.slippage_ticks > 0.0);
 
-    helix::engine::Action sell{helix::engine::Side::Sell, 5.0};
+    helix::engine::Action sell;
+    sell.side = helix::engine::Side::Sell;
+    sell.size = 5.0;
     auto fill_sell = matcher.simulate(sell, book);
     assert(fill_sell.status == helix::engine::FillStatus::Filled);
     assert(fill_sell.partial);

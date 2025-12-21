@@ -8,6 +8,9 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_library(helix_engine
     src/event_bus.cpp
     src/tick_replay.cpp
+    src/fee_model.cpp
+    src/rules_engine.cpp
+    src/order_manager.cpp
     src/feature_engine.cpp
     src/decision_engine.cpp
     src/risk_engine.cpp
@@ -54,6 +57,10 @@ add_executable(test_maker_queue tests/test_maker_queue.cpp)
 target_link_libraries(test_maker_queue PRIVATE helix_engine)
 add_test(NAME test_maker_queue COMMAND test_maker_queue)
 
+add_executable(test_maker_trades tests/test_maker_trades.cpp)
+target_link_libraries(test_maker_trades PRIVATE helix_engine)
+add_test(NAME test_maker_trades COMMAND test_maker_trades)
+
 add_executable(test_matching_fuzz tests/test_matching_fuzz.cpp)
 target_link_libraries(test_matching_fuzz PRIVATE helix_engine)
 add_test(NAME test_matching_fuzz COMMAND test_matching_fuzz)
@@ -77,6 +84,22 @@ add_test(NAME test_exec_cost_identity COMMAND test_exec_cost_identity)
 add_executable(test_deterministic_hash tests/test_deterministic_hash.cpp)
 target_link_libraries(test_deterministic_hash PRIVATE helix_engine)
 add_test(NAME test_deterministic_hash COMMAND test_deterministic_hash)
+
+add_executable(test_rules_fee tests/test_rules_fee.cpp)
+target_link_libraries(test_rules_fee PRIVATE helix_engine)
+add_test(NAME test_rules_fee COMMAND test_rules_fee)
+
+add_executable(test_rules_normalization tests/test_rules_normalization.cpp)
+target_link_libraries(test_rules_normalization PRIVATE helix_engine)
+add_test(NAME test_rules_normalization COMMAND test_rules_normalization)
+
+add_executable(test_fee_exactness_smoke tests/test_fee_exactness_smoke.cpp)
+target_link_libraries(test_fee_exactness_smoke PRIVATE helix_engine)
+add_test(NAME test_fee_exactness_smoke COMMAND test_fee_exactness_smoke)
+
+add_executable(test_order_lifecycle tests/test_order_lifecycle.cpp)
+target_link_libraries(test_order_lifecycle PRIVATE helix_engine)
+add_test(NAME test_order_lifecycle COMMAND test_order_lifecycle)
 
 set(BYBIT_REPLAY ${CMAKE_CURRENT_SOURCE_DIR}/../data/replay/bybit_l2.csv)
 set(REPLAY_BOOKCHECK ${CMAKE_CURRENT_BINARY_DIR}/replay_bookcheck.csv)

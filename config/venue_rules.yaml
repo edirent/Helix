@@ -1,0 +1,12 @@
+venues:
+  BYBIT:
+    BTCUSDT:
+      tick_size: 0.1
+      qty_step: 0.001
+      min_qty: 0.001
+      min_notional: 5.0
+      fee:
+        maker_bps: 2.0
+        taker_bps: 6.0
+        fee_ccy: "USDT"
+        rounding: "ceil_to_cent"

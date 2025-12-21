@@ -225,6 +225,8 @@ func readLoop(ctx context.Context, endpoint, topic string, out chan<- csvRow, bc
 		asks = map[float64]float64{}
 	}
 
+	lastSeq := int64(0)
+
 	getTop := func() (bestBid, bidSz, bestAsk, askSz float64) {
 		for px, sz := range bids {
 			if sz <= 0 {
@@ -303,7 +305,15 @@ func readLoop(ctx context.Context, endpoint, topic string, out chan<- csvRow, bc
 			if msg.Data.Seq != 0 {
 				seq = msg.Data.Seq
 			}
+			if prev == 0 && lastSeq > 0 {
+				prev = lastSeq
+			}
+			if prev == 0 && seq > 0 {
+				prev = seq - 1
+			}
+			lastSeq = seq
 
+			msgPrev := prev
 			emit := func(levels [][]string, side string) bool {
 				for _, lvl := range levels {
 					if len(lvl) < 2 {
@@ -327,12 +337,13 @@ func readLoop(ctx context.Context, endpoint, topic string, out chan<- csvRow, bc
 					row := csvRow{
 						tsMs:    ts,
 						seq:     seq,
-						prevSeq: prev,
+						prevSeq: msgPrev,
 						side:    side,
 						price:   lvl[0],
 						size:    lvl[1],
 						rowType: msg.Type,
 					}
+					msgPrev = seq
 					select {
 					case out <- row:
 					case <-ctx.Done():

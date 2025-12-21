@@ -13,6 +13,7 @@ struct LatencyConfig {
     double jitter_ms{4.0};
     double tail_ms{12.0};
     double tail_prob{0.02};
+    std::string source{"default"};
 };
 
 inline double deterministic_latency_ms(const std::string &symbol, uint64_t seq, uint64_t action_idx,

@@ -4,10 +4,10 @@
 #include <cstdlib>
 #include <deque>
 #include <fstream>
-#include <fstream>
 #include <sstream>
 #include <vector>
 #include <cctype>
+#include <algorithm>
 
 #include "utils/logger.hpp"
 
@@ -50,12 +50,27 @@ bool contains_token(const std::vector<std::string> &fields, const std::string &t
     return false;
 }
 
+Side parse_side_token(const std::string &side) {
+    if (side.empty()) {
+        return Side::Hold;
+    }
+    const char c = static_cast<char>(std::tolower(static_cast<unsigned char>(side[0])));
+    if (c == 'b') {
+        return Side::Buy;
+    }
+    if (c == 's') {
+        return Side::Sell;
+    }
+    return Side::Hold;
+}
+
 }  // namespace
 
 void TickReplay::load_file(const std::filesystem::path &path) {
     source_ = path;
     cursor_ = 0;
     delta_cursor_ = 0;
+    trade_cursor_ = 0;
     last_seq_ = -1;
     last_ts_ms_ = 0;
     using_deltas_ = false;
@@ -64,6 +79,7 @@ void TickReplay::load_file(const std::filesystem::path &path) {
     bids_.clear();
     asks_.clear();
     deltas_.clear();
+    trades_.clear();
 
     const bool loaded = std::filesystem::exists(path) && load_csv_from(path);
     if (loaded) {
@@ -74,6 +90,107 @@ void TickReplay::load_file(const std::filesystem::path &path) {
 
     seed_synthetic_data();
     utils::warn("TickReplay falling back to synthetic feed; file empty or unreadable: " + source_.string());
+}
+
+void TickReplay::load_trades_file(const std::filesystem::path &path) {
+    trades_source_ = path;
+    trades_.clear();
+    trade_cursor_ = 0;
+    if (!std::filesystem::exists(path)) {
+        utils::warn("TickReplay trades file not found: " + path.string());
+        return;
+    }
+    std::ifstream in(path);
+    if (!in.is_open()) {
+        utils::warn("TickReplay cannot open trades file: " + path.string());
+        return;
+    }
+    std::string line;
+    std::vector<std::string> fields;
+    bool header_known = false;
+    std::vector<std::string> headers;
+    auto idx = [&](const std::string &name) -> int {
+        if (!header_known) {
+            return -1;
+        }
+        for (std::size_t i = 0; i < headers.size(); ++i) {
+            if (headers[i] == name) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    };
+    std::size_t line_no = 0;
+    while (std::getline(in, line)) {
+        ++line_no;
+        if (line.empty()) {
+            continue;
+        }
+        if (!parse_line_fields(line, fields)) {
+            continue;
+        }
+        if (!header_known && contains_alpha(fields)) {
+            headers = fields;
+            header_known = true;
+            continue;
+        }
+        const bool use_positional = !header_known;
+        const std::size_t n = fields.size();
+        const int ts_idx = idx("ts_ms");
+        const int side_idx = idx("side");
+        const int price_idx = idx("price");
+        const int size_idx = idx("size");
+        auto get_int64 = [&](int i, int64_t def) -> int64_t {
+            if (i < 0 || static_cast<std::size_t>(i) >= fields.size()) {
+                return def;
+            }
+            return std::strtoll(fields[static_cast<std::size_t>(i)].c_str(), nullptr, 10);
+        };
+        auto get_double = [&](int i, double def) -> double {
+            if (i < 0 || static_cast<std::size_t>(i) >= fields.size()) {
+                return def;
+            }
+            return std::strtod(fields[static_cast<std::size_t>(i)].c_str(), nullptr);
+        };
+        auto get_str = [&](int i) -> std::string {
+            if (i < 0 || static_cast<std::size_t>(i) >= fields.size()) {
+                return {};
+            }
+            return fields[static_cast<std::size_t>(i)];
+        };
+        TradePrint tp;
+        tp.ts_ms = use_positional ? ((n > 0) ? std::strtoll(fields[0].c_str(), nullptr, 10) : 0) : get_int64(ts_idx, 0);
+        tp.side = use_positional ? parse_side_token((n > 1) ? fields[1] : "") : parse_side_token(get_str(side_idx));
+        tp.price = use_positional ? ((n > 2) ? std::strtod(fields[2].c_str(), nullptr) : 0.0) : get_double(price_idx, 0.0);
+        tp.size = use_positional ? ((n > 3) ? std::strtod(fields[3].c_str(), nullptr) : 0.0) : get_double(size_idx, 0.0);
+        if (header_known) {
+            const int id_idx = idx("trade_id");
+            if (id_idx >= 0 && static_cast<std::size_t>(id_idx) < fields.size()) {
+                tp.trade_id = fields[static_cast<std::size_t>(id_idx)];
+            }
+        } else if (n > 4) {
+            tp.trade_id = fields[4];
+        }
+        if (tp.ts_ms <= 0 || tp.side == Side::Hold || tp.price <= 0.0 || tp.size <= 0.0) {
+            continue;
+        }
+        trades_.push_back(tp);
+    }
+    if (!trades_.empty()) {
+        std::sort(trades_.begin(), trades_.end(), [](const TradePrint &a, const TradePrint &b) { return a.ts_ms < b.ts_ms; });
+        utils::info("TickReplay loaded " + std::to_string(trades_.size()) + " trades from " + path.string());
+    } else {
+        utils::warn("TickReplay loaded 0 trades from " + path.string());
+    }
+}
+
+std::vector<TradePrint> TickReplay::drain_trades_up_to(int64_t ts_ms) {
+    std::vector<TradePrint> out;
+    while (trade_cursor_ < trades_.size() && trades_[trade_cursor_].ts_ms <= ts_ms) {
+        out.push_back(trades_[trade_cursor_]);
+        ++trade_cursor_;
+    }
+    return out;
 }
 
 void TickReplay::seed_synthetic_data() {
@@ -105,7 +222,9 @@ bool TickReplay::feed_next(EventBus &bus) {
         orderbook_ = snapshots_[cursor_++];
     }
 
-    check_invariants(orderbook_);
+    if (!(using_deltas_ && repeat_seq_)) {
+        check_invariants(orderbook_);
+    }
     maybe_write_bookcheck();
 
     std::stringstream ss;
@@ -326,21 +445,31 @@ bool TickReplay::apply_next_delta() {
     const auto &d = deltas_[delta_cursor_++];
 
     const bool implicit_snapshot = (!d.snapshot && d.prev_seq == 0);
+    const bool same_seq = (!d.snapshot && !implicit_snapshot && last_seq_ >= 0 && d.seq == last_seq_);
     if (d.snapshot || implicit_snapshot) {
         bids_.clear();
         asks_.clear();
         snapshot_in_progress_ = true;
     } else {
-        if (last_seq_ >= 0 && d.prev_seq != last_seq_) {
-            return set_error("TickReplay detected seq gap: prev=" + std::to_string(last_seq_) +
-                             " next_prev=" + std::to_string(d.prev_seq));
-        }
-        if (last_seq_ >= 0 && d.seq <= last_seq_) {
-            return set_error("TickReplay detected seq rollback: prev=" + std::to_string(last_seq_) +
-                             " next_seq=" + std::to_string(d.seq));
+        if (last_seq_ >= 0) {
+            if (d.seq == last_seq_) {
+                // multiple deltas share the same exchange seq; allow and keep last_seq_ unchanged
+            } else {
+                if (d.prev_seq != last_seq_) {
+                    return set_error("TickReplay detected seq gap: prev=" + std::to_string(last_seq_) +
+                                     " next_prev=" + std::to_string(d.prev_seq));
+                }
+                if (d.seq < last_seq_) {
+                    return set_error("TickReplay detected seq rollback: prev=" + std::to_string(last_seq_) +
+                                     " next_seq=" + std::to_string(d.seq));
+                }
+            }
         }
     }
-    last_seq_ = d.seq;
+    if (d.seq > last_seq_) {
+        last_seq_ = d.seq;
+    }
+    repeat_seq_ = same_seq;
     if (d.ts_ms > 0) {
         last_ts_ms_ = d.ts_ms;
     } else {

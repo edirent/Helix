@@ -1,0 +1,30 @@
+{
+  "run_id": "gate9_taker_demo_r1",
+  "fees": 5.68,
+  "gross": 7.54316748e-13,
+  "realized": 0,
+  "unrealized": 0,
+  "net_total": -5.68,
+  "identity_ok": true,
+  "sharpe_1s": {"sharpe": -4.294026961, "n": 8, "std": 0.4676689916},
+  "sharpe_10s": {"sharpe": -1.262222222, "n": 2, "std": 3.181980515},
+  "max_drawdown": 5.68,
+  "turnover": 9283.062108,
+  "fill_rate": 0.25,
+  "maker_fill_rate": 0,
+  "maker_queue_time_ms": {"avg": 0, "p90": 0},
+  "maker_adv_selection_ticks": {"mean": 0, "p90": 0, "count": 0},
+  "trade_ts_skew_ms": {"p50": 0, "p90": 0, "p99": 0, "n": 0},
+  "fills_total": 12,
+  "makers": 0,
+  "takers": 12,
+  "rejects_total": 36,
+  "actions_attempted": 50,
+  "reject_counts": {
+    "NoAsk": 36
+  },
+  "rules": {"tick_size": 0.1, "qty_step": 0.001, "min_qty": 0.001, "min_notional": 5, "source": "file:config/venue_rules.yaml"},
+  "fee_model": {"maker_bps": 2, "taker_bps": 6, "fee_ccy": "USDT", "rounding": "ceil_to_cent", "source": "file:config/venue_rules.yaml"},
+  "orders": {"orders_placed": 50, "orders_cancelled": 0, "orders_cancel_noop": 0, "orders_replaced": 0, "orders_replace_noop": 0, "orders_rejected": 36, "orders_expired": 7, "illegal_transitions": 0, "open_orders_peak": 1, "avg_order_lifetime_ms": 73.36},
+  "latency": {"base_ms": 10.2156, "jitter_ms": 1.6101, "tail_ms": 10.754, "tail_prob": 0.1, "source": "file:config/latency_fit.json", "samples": {"p50": 11.15458707, "p90": 11.81573278, "p99": 22.02134611, "n": 50}}
+}

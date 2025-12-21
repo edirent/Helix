@@ -12,17 +12,22 @@
 #include <fstream>
 #include <chrono>
 #include <unordered_map>
+#include <unordered_set>
 #include <iomanip>
+#include <optional>
 
+#include "engine/fee_model.hpp"
 #include "engine/decision_engine.hpp"
 #include "engine/latency.hpp"
 #include "engine/event_bus.hpp"
 #include "engine/feature_engine.hpp"
 #include "engine/matching_engine.hpp"
+#include "engine/rules_engine.hpp"
 #include "engine/order_utils.hpp"
 #include "engine/maker_queue.hpp"
 #include "engine/recorder.hpp"
 #include "engine/risk_engine.hpp"
+#include "engine/order_manager.hpp"
 #include "engine/tick_replay.hpp"
 #include "transport/grpc_server.hpp"
 #include "transport/zmq_server.hpp"
@@ -39,6 +44,7 @@ struct PendingAction {
     bool demo{false};
     double target_notional{0.0};
     bool crossing{false};
+    uint64_t order_id{0};
 };
 
 struct PnLAggregate {
@@ -47,6 +53,11 @@ struct PnLAggregate {
     std::vector<double> net_steps;
     std::map<int64_t, double> net_by_1s;
     std::map<int64_t, double> net_by_10s;
+    std::vector<double> maker_queue_times_ms;
+    std::vector<double> maker_adv_ticks;
+    std::vector<double> latency_samples_ms;
+    std::vector<double> trade_skews_ms;
+    int maker_orders_submitted{0};
     double net() const { return gross - fees; }
     double turnover{0.0};
     int fills_total{0};
@@ -106,11 +117,35 @@ struct PnLAggregate {
         }
         return static_cast<double>(fills_total) / static_cast<double>(denom);
     }
+    double maker_fill_rate() const {
+        if (maker_orders_submitted <= 0) {
+            return 0.0;
+        }
+        return static_cast<double>(maker_fills) / static_cast<double>(maker_orders_submitted);
+    }
 };
 
 struct PendingComparator {
     bool operator()(const PendingAction &a, const PendingAction &b) const { return a.fill_ts > b.fill_ts; }
 };
+
+struct PendingMakerAdv {
+    double mid_at_fill{0.0};
+    double fill_vwap{0.0};
+    engine::Side side{engine::Side::Hold};
+    std::size_t fill_row_index{0};
+};
+
+double percentile(const std::vector<double> &values, double pct) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    std::vector<double> sorted = values;
+    std::sort(sorted.begin(), sorted.end());
+    const double rank = (pct / 100.0) * (static_cast<double>(sorted.size()) - 1.0);
+    const std::size_t idx = static_cast<std::size_t>(std::round(rank));
+    return sorted[std::min(idx, sorted.size() - 1)];
+}
 
 std::string side_str(engine::Side side) {
     switch (side) {
@@ -141,12 +176,21 @@ std::string reason_str(engine::RejectReason r) {
             return "NoAsk";
         case engine::RejectReason::NoLiquidity:
             return "NoLiquidity";
+        case engine::RejectReason::MinQty:
+            return "MinQty";
+        case engine::RejectReason::MinNotional:
+            return "MinNotional";
+        case engine::RejectReason::PriceInvalid:
+            return "PriceInvalid";
+        case engine::RejectReason::RiskLimit:
+            return "RiskLimit";
         default:
             return "Unknown";
     }
 }
 
 struct FillRow {
+    uint64_t order_id{0};
     int64_t ts_ms{0};
     int64_t seq{0};
     std::string status;
@@ -171,6 +215,8 @@ struct FillRow {
     int crossing{0};
     int levels_crossed{0};
     double adv_ticks{0.0};
+    double queue_time_ms{0.0};
+    double adv_selection_ticks{0.0};
 };
 
 std::string generate_run_id(const std::string &override_id = "") {
@@ -186,28 +232,158 @@ std::string generate_run_id(const std::string &override_id = "") {
     return ss.str();
 }
 
+bool load_config_from_yaml(const std::filesystem::path &path, const std::string &venue, const std::string &symbol,
+                           engine::RulesConfig &rules_cfg, engine::FeeConfig &fee_cfg) {
+    std::ifstream in(path);
+    if (!in.is_open()) {
+        return false;
+    }
+    std::string line;
+    bool in_venue = false;
+    bool in_symbol = false;
+    bool in_fee = false;
+    auto ltrim = [](const std::string &s) {
+        std::size_t start = s.find_first_not_of(" \t");
+        return (start == std::string::npos) ? std::string() : s.substr(start);
+    };
+    auto keyval = [](const std::string &s, std::string &key, std::string &val) {
+        auto pos = s.find(":");
+        if (pos == std::string::npos) {
+            return false;
+        }
+        key = s.substr(0, pos);
+        val = s.substr(pos + 1);
+        return true;
+    };
+    auto strip_quotes = [](const std::string &s) {
+        std::size_t start = 0;
+        std::size_t end = s.size();
+        while (start < end && (s[start] == '"' || s[start] == '\'')) {
+            ++start;
+        }
+        while (end > start && (s[end - 1] == '"' || s[end - 1] == '\'')) {
+            --end;
+        }
+        return s.substr(start, end - start);
+    };
+    while (std::getline(in, line)) {
+        std::string trimmed = ltrim(line);
+        if (trimmed.empty() || trimmed[0] == '#') {
+            continue;
+        }
+        if (trimmed.back() == '\r') {
+            trimmed.pop_back();
+        }
+        if (trimmed == venue + ":") {
+            in_venue = true;
+            in_symbol = false;
+            in_fee = false;
+            continue;
+        }
+        if (in_venue && trimmed == symbol + ":") {
+            in_symbol = true;
+            in_fee = false;
+            continue;
+        }
+        if (!in_symbol) {
+            continue;
+        }
+        if (trimmed.rfind("fee:", 0) == 0) {
+            in_fee = true;
+            continue;
+        }
+        std::string key, val;
+        if (!keyval(trimmed, key, val)) {
+            continue;
+        }
+        key = ltrim(key);
+        val = ltrim(val);
+        if (in_fee) {
+            if (key == "maker_bps") {
+                fee_cfg.maker_bps = std::stod(val);
+            } else if (key == "taker_bps") {
+                fee_cfg.taker_bps = std::stod(val);
+            } else if (key == "fee_ccy") {
+                fee_cfg.fee_ccy = strip_quotes(val);
+            } else if (key == "rounding") {
+                fee_cfg.rounding = strip_quotes(val);
+            }
+        } else {
+            if (key == "tick_size") {
+                rules_cfg.tick_size = std::stod(val);
+            } else if (key == "qty_step") {
+                rules_cfg.qty_step = std::stod(val);
+            } else if (key == "min_qty") {
+                rules_cfg.min_qty = std::stod(val);
+            } else if (key == "min_notional") {
+                rules_cfg.min_notional = std::stod(val);
+            }
+        }
+    }
+    return true;
+}
+
+bool load_latency_fit(const std::filesystem::path &path, engine::LatencyConfig &cfg) {
+    std::ifstream in(path);
+    if (!in.is_open()) {
+        return false;
+    }
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    const std::string content = buffer.str();
+    auto extract = [&](const std::string &key, double &out) -> bool {
+        const auto pos = content.find(key);
+        if (pos == std::string::npos) {
+            return false;
+        }
+        const auto colon = content.find(":", pos);
+        if (colon == std::string::npos) {
+            return false;
+        }
+        const std::string tail = content.substr(colon + 1);
+        try {
+            out = std::stod(tail);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    };
+    extract("base_ms", cfg.base_ms);
+    extract("jitter_ms", cfg.jitter_ms);
+    extract("tail_ms", cfg.tail_ms);
+    extract("tail_prob", cfg.tail_prob);
+    cfg.source = "file:" + path.string();
+    return true;
+}
 bool write_fills_csv(const std::filesystem::path &path, const std::vector<FillRow> &rows) {
     std::ofstream out(path);
     if (!out.is_open()) {
         return false;
     }
-    out << "ts_ms,seq,status,side,liquidity,src,reason,vwap,filled_qty,unfilled_qty,fee,fee_bps,gross,net,"
-           "exec_cost_ticks_signed,mid,best,spread_paid_ticks,slip_ticks,target_notional,filled_notional,crossing,levels_crossed,adv_ticks\n";
+    out << "order_id,ts_ms,seq,status,side,liquidity,src,reason,vwap,filled_qty,unfilled_qty,fee,fee_bps,gross,net,"
+           "exec_cost_ticks_signed,mid,best,spread_paid_ticks,slip_ticks,target_notional,filled_notional,crossing,levels_crossed,adv_ticks,queue_time_ms,adv_selection_ticks\n";
     out << std::setprecision(10);
     for (const auto &r : rows) {
-        out << r.ts_ms << "," << r.seq << "," << r.status << "," << r.side << "," << r.liquidity << "," << r.src
-            << "," << r.reason << "," << r.vwap << "," << r.filled_qty << "," << r.unfilled_qty << "," << r.fee << ","
-            << r.fee_bps << "," << r.gross << "," << r.net << "," << r.exec_cost_ticks_signed << "," << r.mid << ","
-            << r.best << "," << r.spread_paid_ticks << "," << r.slip_ticks << "," << r.target_notional << ","
-            << r.filled_notional << "," << r.crossing << "," << r.levels_crossed << "," << r.adv_ticks << "\n";
+        out << r.order_id << "," << r.ts_ms << "," << r.seq << "," << r.status << "," << r.side << "," << r.liquidity
+            << "," << r.src << "," << r.reason << "," << r.vwap << "," << r.filled_qty << "," << r.unfilled_qty << ","
+            << r.fee << "," << r.fee_bps << "," << r.gross << "," << r.net << "," << r.exec_cost_ticks_signed << ","
+            << r.mid << "," << r.best << "," << r.spread_paid_ticks << "," << r.slip_ticks << ","
+            << r.target_notional << "," << r.filled_notional << "," << r.crossing << "," << r.levels_crossed << ","
+            << r.adv_ticks << "," << r.queue_time_ms << "," << r.adv_selection_ticks << "\n";
     }
     return true;
 }
 
 bool write_metrics_json(const std::filesystem::path &path, const std::string &run_id, const PnLAggregate &pnl,
                         double realized, double unrealized, double net_total, const PnLAggregate::SharpeStats &s1,
-                        const PnLAggregate::SharpeStats &s10, double max_dd, double fill_rate,
-                        const std::unordered_map<std::string, int> &reject_counts, bool identity_ok) {
+                        const PnLAggregate::SharpeStats &s10, double max_dd, double fill_rate, double maker_fill_rate,
+                        double maker_queue_avg, double maker_queue_p90, double maker_adv_mean, double maker_adv_p90,
+                        const std::unordered_map<std::string, int> &reject_counts, bool identity_ok,
+                        const engine::RulesConfig &rules_cfg, const engine::FeeConfig &fee_cfg,
+                        const engine::OrderMetrics &order_metrics, double avg_lifetime_ms,
+                        const engine::LatencyConfig &lat_cfg, double lat_p50, double lat_p90, double lat_p99,
+                        std::size_t lat_n, double trade_skew_p50, double trade_skew_p90, double trade_skew_p99,
+                        std::size_t trade_skew_n, std::size_t maker_adv_count) {
     std::ofstream out(path);
     if (!out.is_open()) {
         return false;
@@ -227,6 +403,12 @@ bool write_metrics_json(const std::filesystem::path &path, const std::string &ru
     out << "  \"max_drawdown\": " << max_dd << ",\n";
     out << "  \"turnover\": " << pnl.turnover << ",\n";
     out << "  \"fill_rate\": " << fill_rate << ",\n";
+    out << "  \"maker_fill_rate\": " << maker_fill_rate << ",\n";
+    out << "  \"maker_queue_time_ms\": {\"avg\": " << maker_queue_avg << ", \"p90\": " << maker_queue_p90 << "},\n";
+    out << "  \"maker_adv_selection_ticks\": {\"mean\": " << maker_adv_mean << ", \"p90\": " << maker_adv_p90
+        << ", \"count\": " << maker_adv_count << "},\n";
+    out << "  \"trade_ts_skew_ms\": {\"p50\": " << trade_skew_p50 << ", \"p90\": " << trade_skew_p90
+        << ", \"p99\": " << trade_skew_p99 << ", \"n\": " << trade_skew_n << "},\n";
     out << "  \"fills_total\": " << pnl.fills_total << ",\n";
     out << "  \"makers\": " << pnl.maker_fills << ",\n";
     out << "  \"takers\": " << pnl.taker_fills << ",\n";
@@ -242,8 +424,41 @@ bool write_metrics_json(const std::filesystem::path &path, const std::string &ru
         }
         out << "\n";
     }
-    out << "  }\n";
+    out << "  },\n";
+    out << "  \"rules\": {\"tick_size\": " << rules_cfg.tick_size << ", \"qty_step\": " << rules_cfg.qty_step
+        << ", \"min_qty\": " << rules_cfg.min_qty << ", \"min_notional\": " << rules_cfg.min_notional
+        << ", \"source\": \"" << rules_cfg.source << "\"},\n";
+    out << "  \"fee_model\": {\"maker_bps\": " << fee_cfg.maker_bps << ", \"taker_bps\": " << fee_cfg.taker_bps
+        << ", \"fee_ccy\": \"" << fee_cfg.fee_ccy << "\", \"rounding\": \"" << fee_cfg.rounding
+        << "\", \"source\": \"" << fee_cfg.source << "\"},\n";
+    out << "  \"orders\": {\"orders_placed\": " << order_metrics.orders_placed
+        << ", \"orders_cancelled\": " << order_metrics.orders_cancelled
+        << ", \"orders_cancel_noop\": " << order_metrics.orders_cancel_noop
+        << ", \"orders_replaced\": " << order_metrics.orders_replaced
+        << ", \"orders_replace_noop\": " << order_metrics.orders_replace_noop
+        << ", \"orders_rejected\": " << order_metrics.orders_rejected
+        << ", \"orders_expired\": " << order_metrics.orders_expired
+        << ", \"illegal_transitions\": " << order_metrics.illegal_transitions
+        << ", \"open_orders_peak\": " << order_metrics.open_orders_peak << ", \"avg_order_lifetime_ms\": "
+        << avg_lifetime_ms << "},\n";
+    out << "  \"latency\": {\"base_ms\": " << lat_cfg.base_ms << ", \"jitter_ms\": " << lat_cfg.jitter_ms
+        << ", \"tail_ms\": " << lat_cfg.tail_ms << ", \"tail_prob\": " << lat_cfg.tail_prob
+        << ", \"source\": \"" << lat_cfg.source << "\""
+        << ", \"samples\": {\"p50\": " << lat_p50 << ", \"p90\": " << lat_p90 << ", \"p99\": " << lat_p99
+        << ", \"n\": " << lat_n << "}}\n";
     out << "}\n";
+    return true;
+}
+
+bool write_latency_samples_csv(const std::filesystem::path &path, const std::vector<double> &samples) {
+    std::ofstream out(path);
+    if (!out.is_open()) {
+        return false;
+    }
+    out << "latency_ms\n";
+    for (double v : samples) {
+        out << v << "\n";
+    }
     return true;
 }
 }  // namespace
@@ -254,9 +469,20 @@ int main(int argc, char **argv) {
     double demo_notional = 0.0;
     int64_t demo_interval_ms = 500;
     int demo_max_actions = 30;
+    bool demo_only = false;
+    bool maker_demo = false;
+    double maker_notional = 0.0;
+    int64_t maker_interval_ms = 500;
+    int maker_max_actions = 30;
+    int64_t maker_ttl_ms = 200;
     std::string replay_bookcheck_path;
     std::size_t replay_bookcheck_every = 0;
     std::string run_id_override;
+    std::string rules_config_path = "config/venue_rules.yaml";
+    std::string trades_path;
+    std::string latency_fit_path;
+    std::string venue = "BYBIT";
+    std::string venue_symbol = "BTCUSDT";
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--no_actions") {
@@ -267,12 +493,34 @@ int main(int argc, char **argv) {
             demo_interval_ms = std::stoll(argv[++i]);
         } else if (arg == "--demo_max" && i + 1 < argc) {
             demo_max_actions = std::stoi(argv[++i]);
+        } else if (arg == "--demo_only") {
+            demo_only = true;
+        } else if (arg == "--maker_demo") {
+            maker_demo = true;
+        } else if (arg == "--maker_notional" && i + 1 < argc) {
+            maker_notional = std::stod(argv[++i]);
+        } else if (arg == "--maker_interval_ms" && i + 1 < argc) {
+            maker_interval_ms = std::stoll(argv[++i]);
+        } else if (arg == "--maker_max" && i + 1 < argc) {
+            maker_max_actions = std::stoi(argv[++i]);
+        } else if (arg == "--maker_ttl_ms" && i + 1 < argc) {
+            maker_ttl_ms = std::stoll(argv[++i]);
         } else if (arg == "--bookcheck" && i + 1 < argc) {
             replay_bookcheck_path = argv[++i];
         } else if (arg == "--bookcheck_every" && i + 1 < argc) {
             replay_bookcheck_every = static_cast<std::size_t>(std::stoull(argv[++i]));
         } else if (arg == "--run_id" && i + 1 < argc) {
             run_id_override = argv[++i];
+        } else if (arg == "--rules_config" && i + 1 < argc) {
+            rules_config_path = argv[++i];
+        } else if (arg == "--venue" && i + 1 < argc) {
+            venue = argv[++i];
+        } else if (arg == "--symbol" && i + 1 < argc) {
+            venue_symbol = argv[++i];
+        } else if (arg == "--trades" && i + 1 < argc) {
+            trades_path = argv[++i];
+        } else if (arg == "--latency_fit" && i + 1 < argc) {
+            latency_fit_path = argv[++i];
         } else if (replay_source == "data/replay/synthetic.csv") {
             replay_source = arg;
         } else {
@@ -290,10 +538,29 @@ int main(int argc, char **argv) {
     }
     const std::filesystem::path fills_path = run_dir / "fills.csv";
     const std::filesystem::path metrics_path = run_dir / "metrics.json";
+    const std::filesystem::path latency_samples_path = run_dir / "latency_samples.csv";
+
+    engine::RulesConfig rules_cfg{0.1, 0.001, 0.001, 5.0, 0.0, "default"};
+    engine::FeeConfig fee_cfg{2.0, 6.0, "USDT", "ceil_to_cent", "default"};
+    if (load_config_from_yaml(rules_config_path, venue, venue_symbol, rules_cfg, fee_cfg)) {
+        rules_cfg.source = "file:" + rules_config_path;
+        fee_cfg.source = "file:" + rules_config_path;
+    }
+    engine::RulesEngine rules(rules_cfg);
+    engine::FeeModel fee_model(fee_cfg);
 
     engine::EventBus bus(64);
     engine::TickReplay replay;
     replay.load_file(replay_source);
+    if (trades_path.empty()) {
+        const std::filesystem::path candidate = std::filesystem::path("data/replay/bybit_trades.csv");
+        if (std::filesystem::exists(candidate)) {
+            trades_path = candidate.string();
+        }
+    }
+    if (!trades_path.empty()) {
+        replay.load_trades_file(trades_path);
+    }
     if (!replay_bookcheck_path.empty() && replay_bookcheck_every > 0) {
         replay.enable_bookcheck(replay_bookcheck_path, replay_bookcheck_every);
     }
@@ -304,21 +571,56 @@ int main(int argc, char **argv) {
     const double tick_size = 0.1;  // Bybit BTC tick size
     const std::string symbol = "SIM";
     engine::MatchingEngine matching_engine(symbol, tick_size);
+    engine::OrderManager order_manager;
     engine::Recorder recorder("engine_events.log");
     engine::TradeTape tape{100.0, 1.0};
     engine::LatencyConfig latency_cfg;
+    if (!latency_fit_path.empty()) {
+        if (!load_latency_fit(latency_fit_path, latency_cfg)) {
+            utils::warn("Failed to load latency fit from " + latency_fit_path + ", using defaults");
+        }
+    } else if (std::filesystem::exists("config/latency_fit.json")) {
+        load_latency_fit("config/latency_fit.json", latency_cfg);
+    }
     uint64_t action_seq = 0;
     std::priority_queue<PendingAction, std::vector<PendingAction>, PendingComparator> pending_actions;
     PnLAggregate pnl;
     engine::MakerParams maker_params{};
+    if (maker_ttl_ms > 0) {
+        maker_params.expire_ms = maker_ttl_ms;
+    }
+    if (maker_demo) {
+        maker_params.q_init = 0.0;
+        maker_params.alpha = 1.0;
+    }
     engine::MakerQueueSim maker_sim(maker_params, tick_size);
+    std::unordered_set<uint64_t> cancelled_orders;
+    std::unordered_set<uint64_t> maker_open_orders;
+    std::unordered_set<uint64_t> pending_order_ids;
+    std::vector<PendingMakerAdv> pending_maker_adv;
     int64_t last_demo_ts = 0;
     int demo_sent = 0;
+    int64_t last_maker_demo_ts = 0;
+    int maker_demo_sent = 0;
     std::vector<FillRow> fill_rows;
     const bool demo_mode = demo_notional > 0.0;
-    if (demo_mode) {
+    if (demo_mode || maker_demo) {
         no_actions = false;  // demo overrides global no_actions intent
     }
+    auto close_order_tracking = [&](uint64_t order_id) {
+        auto it = order_manager.orders().find(order_id);
+        if (it == order_manager.orders().end()) {
+            return;
+        }
+        const auto st = it->second.status;
+        if (st == engine::OrderStatus::Filled || st == engine::OrderStatus::Cancelled ||
+            st == engine::OrderStatus::Expired || st == engine::OrderStatus::Replaced ||
+            st == engine::OrderStatus::Rejected) {
+            maker_open_orders.erase(order_id);
+            pending_order_ids.erase(order_id);
+            cancelled_orders.erase(order_id);
+        }
+    };
 
     transport::ZmqServer feature_pub("tcp://*:7001");
     transport::GrpcServer action_pub("0.0.0.0:50051");
@@ -343,6 +645,7 @@ int main(int argc, char **argv) {
         row.mid = mid;
         row.best = best;
         row.target_notional = target_notional;
+        row.order_id = fill.order_id;
         fill_rows.push_back(row);
         std::stringstream ss;
         ss << "fill_reject side=" << static_cast<int>(fill.side) << " reason=" << static_cast<int>(fill.reason);
@@ -366,10 +669,10 @@ int main(int argc, char **argv) {
         const double new_mark_pnl = risk_engine.position().pnl +
                                     risk_engine.position().qty * (mark - risk_engine.position().avg_price);
         const double gross_delta = new_mark_pnl - prev_mark_pnl;
-        const double fee_rate = (fill.liquidity == engine::Liquidity::Maker) ? 0.0002 : 0.0006;
+        const auto fee_res = fee_model.compute(fill);
         const double notional = fill.vwap_price * fill.filled_qty;
-        const double fee_paid = notional * fee_rate;
-        const double fee_bps = notional > 0.0 ? (fee_paid / notional) * 1e4 : 0.0;
+        const double fee_paid = fee_res.fee;
+        const double fee_bps = fee_res.fee_bps;
         pnl.turnover += std::abs(notional);
         pnl.gross += gross_delta;
         pnl.fees += fee_paid;
@@ -400,6 +703,7 @@ int main(int argc, char **argv) {
         row.liquidity = liquidity_str(fill.liquidity);
         row.src = src;
         row.reason = reason_str(fill.reason);
+        row.order_id = fill.order_id;
         row.vwap = fill.vwap_price;
         row.filled_qty = fill.filled_qty;
         row.unfilled_qty = fill.unfilled_qty;
@@ -417,7 +721,21 @@ int main(int argc, char **argv) {
         row.crossing = crossing ? 1 : 0;
         row.levels_crossed = static_cast<int>(fill.levels_crossed);
         row.adv_ticks = adv_ticks;
+        row.queue_time_ms = 0.0;
+        row.adv_selection_ticks = 0.0;
+        std::size_t row_idx = fill_rows.size();
         fill_rows.push_back(row);
+        if (fill.liquidity == engine::Liquidity::Maker) {
+            auto it = order_manager.orders().find(fill.order_id);
+            if (it != order_manager.orders().end()) {
+                const double qt = static_cast<double>(book.ts_ms - it->second.created_ts);
+                fill_rows[row_idx].queue_time_ms = qt;
+                pnl.maker_queue_times_ms.push_back(qt);
+            }
+            if (mid > 0.0) {
+                pending_maker_adv.push_back(PendingMakerAdv{mid, fill.vwap_price, fill.side, row_idx});
+            }
+        }
 
         std::stringstream ss;
         ss << "fill side=" << static_cast<int>(fill.side) << " vwap=" << fill.vwap_price << " filled="
@@ -434,18 +752,56 @@ int main(int argc, char **argv) {
         utils::info(ss.str());
     };
     while (replay.feed_next(bus)) {
+        const double current_mid =
+            (replay.current_book().best_bid > 0.0 && replay.current_book().best_ask > 0.0)
+                ? (replay.current_book().best_bid + replay.current_book().best_ask) / 2.0
+                : 0.0;
+        if (current_mid > 0.0 && !pending_maker_adv.empty()) {
+            for (const auto &p : pending_maker_adv) {
+                const double delta_mid = current_mid - p.mid_at_fill;
+                const double adv = (p.side == engine::Side::Buy ? delta_mid : -delta_mid) / tick_size;
+                pnl.maker_adv_ticks.push_back(adv);
+                if (p.fill_row_index < fill_rows.size()) {
+                    fill_rows[p.fill_row_index].adv_selection_ticks = adv;
+                }
+            }
+            pending_maker_adv.clear();
+        }
         auto evt = bus.poll();
         if (!evt) {
             continue;
         }
         recorder.record(*evt);
 
+        // expire open orders based on replay time
+        order_manager.expire_orders(replay.current_book().ts_ms);
+        for (const auto &kv : order_manager.orders()) {
+            if (kv.second.status == engine::OrderStatus::Expired) {
+                maker_sim.cancel(kv.first);
+                close_order_tracking(kv.first);
+            }
+        }
+
         // Update maker queue fills against the latest book.
         const int64_t now_ts = replay.current_book().ts_ms;
+        const auto trades = replay.drain_trades_up_to(now_ts);
+        for (const auto &tp : trades) {
+            pnl.trade_skews_ms.push_back(static_cast<double>(now_ts - tp.ts_ms));
+        }
+        if (!trades.empty()) {
+            tape.last_price = trades.back().price;
+            tape.last_size = trades.back().size;
+        }
         if (!no_actions) {
-            for (auto &fill : maker_sim.on_book(replay.current_book(), now_ts)) {
+            for (auto &fill : maker_sim.on_book(replay.current_book(), now_ts, trades)) {
                 if (fill.status == engine::FillStatus::Filled) {
                     handle_fill(fill, false, false, 0.0, "MAKER", maker_params.adv_ticks);
+                    order_manager.apply_fill(fill, now_ts);
+                    if (order_manager.has_error()) {
+                        utils::error("[FATAL][orders] " + order_manager.error_message());
+                        return 1;
+                    }
+                    close_order_tracking(fill.order_id);
                 }
             }
         }
@@ -456,8 +812,21 @@ int main(int argc, char **argv) {
             while (!pending_actions.empty() && pending_actions.top().fill_ts <= now_ts) {
                 const auto pending = pending_actions.top();
                 pending_actions.pop();
+                if (cancelled_orders.count(pending.order_id)) {
+                    pending_order_ids.erase(pending.order_id);
+                    continue;
+                }
+                auto ord_it = order_manager.orders().find(pending.order_id);
+                if (ord_it != order_manager.orders().end()) {
+                    const auto st = ord_it->second.status;
+                    if (st == engine::OrderStatus::Cancelled || st == engine::OrderStatus::Expired ||
+                        st == engine::OrderStatus::Replaced || st == engine::OrderStatus::Filled ||
+                        st == engine::OrderStatus::Rejected) {
+                        pending_order_ids.erase(pending.order_id);
+                        continue;
+                    }
+                }
                 auto fill = matching_engine.simulate(pending.action, replay.current_book());
-                pnl.actions_attempted += 1;
                 const std::string src = pending.demo ? "DEMO" : "STRAT";
                 if (fill.status == engine::FillStatus::Filled) {
                     const double target_notional = pending.target_notional;
@@ -468,12 +837,22 @@ int main(int argc, char **argv) {
                         utils::error(err.str());
                         std::exit(1);
                     }
+                    fill.order_id = pending.order_id;
                     handle_fill(fill, pending.demo, pending.crossing, target_notional, src,
                                 fill.liquidity == engine::Liquidity::Maker ? maker_params.adv_ticks : 0.0);
                     action_pub.publish({pending.action, symbol});
+                    order_manager.apply_fill(fill, now_ts);
+                    if (order_manager.has_error()) {
+                        utils::error("[FATAL][orders] " + order_manager.error_message());
+                        return 1;
+                    }
+                    close_order_tracking(fill.order_id);
                 } else {
                     handle_reject(fill, pending.demo, pending.target_notional, src);
+                    order_manager.mark_rejected(pending.order_id, now_ts);
+                    close_order_tracking(pending.order_id);
                 }
+                pending_order_ids.erase(pending.order_id);
             }
         }
 
@@ -482,10 +861,36 @@ int main(int argc, char **argv) {
 
         if (!no_actions) {
             if (demo_mode && demo_sent >= demo_max_actions) {
-                continue;  // cap demo actions; still consume ticks for invariants/pending fills
+                if (demo_only && !maker_demo) {
+                    continue;  // cap demo actions; still consume ticks
+                }
             }
             bool issued_demo = false;
             engine::Action action;
+            // Maker demo generation
+            if (maker_demo && maker_demo_sent < maker_max_actions) {
+                if (last_maker_demo_ts == 0 || (now_ts - last_maker_demo_ts) >= maker_interval_ms) {
+                    double ref_px_buy = replay.current_book().best_bid;
+                    double ref_px_sell = replay.current_book().best_ask;
+                    if (ref_px_buy > 0.0 && ref_px_sell > 0.0) {
+                        const bool do_buy = (maker_demo_sent % 2 == 0);
+                        action.side = do_buy ? engine::Side::Buy : engine::Side::Sell;
+                        const double ref_px = do_buy ? ref_px_buy : ref_px_sell;
+                        const double qty = (maker_notional > 0.0 && ref_px > 0.0) ? (maker_notional / ref_px) : 0.0;
+                        if (qty > 0.0) {
+                            action.size = qty;
+                            action.notional = maker_notional;
+                            action.is_maker = true;
+                            action.limit_price = do_buy ? ref_px_buy : ref_px_sell;
+                            action.type = engine::OrderType::Limit;
+                            last_maker_demo_ts = now_ts;
+                            issued_demo = true;
+                            ++maker_demo_sent;
+                        }
+                    }
+                }
+            }
+
             if (demo_notional > 0.0 && demo_sent < demo_max_actions) {
                 if (last_demo_ts == 0 || (now_ts - last_demo_ts) >= demo_interval_ms) {
                     double ref_px = replay.current_book().best_ask;
@@ -497,43 +902,157 @@ int main(int argc, char **argv) {
                         ref_px = (replay.current_book().best_bid + replay.current_book().best_ask) / 2.0;
                     }
                     if (ref_px <= 0.0) {
-                        continue;  // no valid reference price
+                        if (demo_only && issued_demo) {
+                            // keep maker demo
+                        } else {
+                            // no valid ref price for taker; skip this tick
+                            continue;
+                        }
                     }
-                    const double qty = demo_notional / ref_px;
-                    if (qty > 0.0) {
-                        last_demo_ts = now_ts;
-                        action.side = engine::Side::Buy;
-                        action.size = qty;
-                        action.notional = demo_notional;
-                        action.is_maker = false;
-                        issued_demo = true;
+                    if (!issued_demo) {
+                        const double qty = demo_notional / ref_px;
+                        if (qty > 0.0) {
+                            last_demo_ts = now_ts;
+                            action.side = engine::Side::Buy;
+                            action.size = qty;
+                            action.notional = demo_notional;
+                            action.is_maker = false;
+                            issued_demo = true;
+                        }
                     }
                 }
             }
             if (demo_notional > 0.0 && !issued_demo) {
                 // demo mode: skip other actions when not time yet
+                if (demo_only && !maker_demo) {
+                    continue;
+                }
+            }
+            if (demo_only && !issued_demo) {
                 continue;
             }
             if (!issued_demo) {
                 action = decision_engine.decide(feature);
             }
-            if (risk_engine.validate(action, replay.current_book().best_ask)) {
-                const bool crossing = engine::is_crossing_limit(action, replay.current_book());
-                if (crossing) {
-                    action.is_maker = false;
+            pnl.actions_attempted += 1;
+            if (action.kind == engine::ActionKind::Cancel) {
+                const uint64_t oid = action.target_order_id;
+                auto res = order_manager.cancel(oid, now_ts);
+                if (res.success) {
+                    cancelled_orders.insert(oid);
+                    maker_sim.cancel(oid);
+                    pending_order_ids.erase(oid);
+                    close_order_tracking(oid);
                 }
-                if (action.is_maker) {
-                    maker_sim.submit(action, replay.current_book(), now_ts);
+                continue;
+            }
+            if (action.kind == engine::ActionKind::Replace) {
+                const uint64_t oid = action.target_order_id;
+                auto ord_it = order_manager.orders().find(oid);
+                if (ord_it == order_manager.orders().end()) {
+                    continue;
+                }
+                const auto &old = ord_it->second;
+                engine::Action replace_action = action;
+                replace_action.kind = engine::ActionKind::Place;
+                replace_action.side = old.side;
+                replace_action.type = old.type;
+                if (replace_action.size <= 0.0) {
+                    replace_action.size = std::max(0.0, old.qty - old.filled_qty);
+                }
+                if (replace_action.limit_price <= 0.0) {
+                    replace_action.limit_price = old.price;
+                }
+                const auto rules_res = rules.apply(replace_action, replay.current_book());
+                if (!rules_res.ok) {
+                    auto rej = engine::Fill::rejected(replace_action.side, rules_res.reason);
+                    rej.order_id = oid;
+                    handle_reject(rej, issued_demo, replace_action.notional, issued_demo ? "DEMO" : "STRAT");
+                    order_manager.mark_rejected(oid, now_ts);
+                    close_order_tracking(oid);
+                    continue;
+                }
+                replace_action = rules_res.normalized;
+                const double ref_price =
+                    (replace_action.side == engine::Side::Buy) ? replay.current_book().best_ask : replay.current_book().best_bid;
+                const double last_px = (ref_price > 0.0) ? ref_price : replace_action.limit_price;
+                if (!risk_engine.validate(replace_action, last_px)) {
+                    auto rej = engine::Fill::rejected(replace_action.side, engine::RejectReason::RiskLimit);
+                    rej.order_id = oid;
+                    handle_reject(rej, issued_demo, replace_action.notional, issued_demo ? "DEMO" : "STRAT");
+                    order_manager.mark_rejected(oid, now_ts);
+                    close_order_tracking(oid);
+                    continue;
+                }
+                const bool new_is_maker = action.is_maker || maker_open_orders.count(oid) > 0;
+                bool crossing_replace = engine::is_crossing_limit(replace_action, replay.current_book());
+                const bool final_is_maker = new_is_maker && !crossing_replace;
+                auto rep_res = order_manager.replace(oid, replace_action.limit_price, replace_action.size, now_ts,
+                                                     now_ts + static_cast<int64_t>(maker_params.expire_ms));
+                if (!rep_res.success) {
+                    continue;
+                }
+                cancelled_orders.insert(oid);
+                maker_sim.cancel(oid);
+                pending_order_ids.erase(oid);
+                close_order_tracking(oid);
+                replace_action.order_id = rep_res.new_order.order_id;
+                replace_action.is_maker = final_is_maker;
+                if (replace_action.is_maker) {
+                    maker_sim.submit(replace_action, replay.current_book(), now_ts);
+                    maker_open_orders.insert(replace_action.order_id);
+                    pnl.maker_orders_submitted += 1;
                 } else {
                     const double latency_ms =
                         engine::deterministic_latency_ms(symbol, action_seq, action_seq, latency_cfg);
                     const int64_t fill_ts = now_ts + static_cast<int64_t>(latency_ms);
-                    pending_actions.push(
-                        PendingAction{action, fill_ts, action_seq, action_seq, issued_demo, action.notional, crossing});
+                    pending_actions.push(PendingAction{replace_action, fill_ts, action_seq, action_seq, issued_demo,
+                                                       replace_action.notional, crossing_replace,
+                                                       replace_action.order_id});
+                    pnl.latency_samples_ms.push_back(latency_ms);
+                    pending_order_ids.insert(replace_action.order_id);
                     ++action_seq;
-                    if (issued_demo) {
-                        ++demo_sent;
-                    }
+                }
+                continue;
+            }
+            const auto rules_res = rules.apply(action, replay.current_book());
+            if (!rules_res.ok) {
+                auto rej = engine::Fill::rejected(action.side, rules_res.reason);
+                handle_reject(rej, issued_demo, action.notional, issued_demo ? "DEMO" : "STRAT");
+                continue;
+            }
+            action = rules_res.normalized;
+            const double ref_price =
+                (action.side == engine::Side::Buy) ? replay.current_book().best_ask : replay.current_book().best_bid;
+            const double last_px = (ref_price > 0.0) ? ref_price : action.limit_price;
+            if (!risk_engine.validate(action, last_px)) {
+                auto rej = engine::Fill::rejected(action.side, engine::RejectReason::RiskLimit);
+                handle_reject(rej, issued_demo, action.notional, issued_demo ? "DEMO" : "STRAT");
+                continue;
+            }
+
+            const bool crossing = engine::is_crossing_limit(action, replay.current_book());
+            if (crossing) {
+                action.is_maker = false;
+            }
+            // place order and attach id
+            auto placed = order_manager.place(action, now_ts, now_ts + static_cast<int64_t>(maker_params.expire_ms));
+            action.order_id = placed.order_id;
+            if (action.is_maker) {
+                maker_sim.submit(action, replay.current_book(), now_ts);
+                maker_open_orders.insert(action.order_id);
+                pnl.maker_orders_submitted += 1;
+            } else {
+                const double latency_ms = engine::deterministic_latency_ms(symbol, action_seq, action_seq, latency_cfg);
+                const int64_t fill_ts = now_ts + static_cast<int64_t>(latency_ms);
+                pending_actions.push(
+                    PendingAction{action, fill_ts, action_seq, action_seq, issued_demo, action.notional, crossing,
+                                  placed.order_id});
+                pnl.latency_samples_ms.push_back(latency_ms);
+                pending_order_ids.insert(action.order_id);
+                ++action_seq;
+                if (issued_demo) {
+                    ++demo_sent;
                 }
             }
         }
@@ -549,8 +1068,21 @@ int main(int argc, char **argv) {
         while (!pending_actions.empty()) {
             const auto pending = pending_actions.top();
             pending_actions.pop();
+            if (cancelled_orders.count(pending.order_id)) {
+                pending_order_ids.erase(pending.order_id);
+                continue;
+            }
+            auto ord_it = order_manager.orders().find(pending.order_id);
+            if (ord_it != order_manager.orders().end()) {
+                const auto st = ord_it->second.status;
+                if (st == engine::OrderStatus::Cancelled || st == engine::OrderStatus::Expired ||
+                    st == engine::OrderStatus::Replaced || st == engine::OrderStatus::Filled ||
+                    st == engine::OrderStatus::Rejected) {
+                    pending_order_ids.erase(pending.order_id);
+                    continue;
+                }
+            }
             auto fill = matching_engine.simulate(pending.action, replay.current_book());
-            pnl.actions_attempted += 1;
             const std::string src = pending.demo ? "DEMO" : "STRAT";
             if (fill.status == engine::FillStatus::Filled) {
                 const double target_notional = pending.target_notional;
@@ -563,10 +1095,42 @@ int main(int argc, char **argv) {
                 }
                 handle_fill(fill, pending.demo, pending.crossing, target_notional, src,
                             fill.liquidity == engine::Liquidity::Maker ? maker_params.adv_ticks : 0.0);
+                order_manager.apply_fill(fill, replay.current_book().ts_ms);
+                if (order_manager.has_error()) {
+                    utils::error("[FATAL][orders] " + order_manager.error_message());
+                    return 1;
+                }
+                close_order_tracking(fill.order_id);
             } else {
                 handle_reject(fill, pending.demo, pending.target_notional, src);
+                order_manager.mark_rejected(pending.order_id, replay.current_book().ts_ms);
+                close_order_tracking(pending.order_id);
+            }
+            pending_order_ids.erase(pending.order_id);
+        }
+    }
+
+    if (!pending_maker_adv.empty()) {
+        const double final_mid =
+            (replay.current_book().best_bid > 0.0 && replay.current_book().best_ask > 0.0)
+                ? (replay.current_book().best_bid + replay.current_book().best_ask) / 2.0
+                : 0.0;
+        if (final_mid > 0.0) {
+            for (const auto &p : pending_maker_adv) {
+                const double delta_mid = final_mid - p.mid_at_fill;
+                const double adv = (p.side == engine::Side::Buy ? delta_mid : -delta_mid) / tick_size;
+                pnl.maker_adv_ticks.push_back(adv);
+                if (p.fill_row_index < fill_rows.size()) {
+                    fill_rows[p.fill_row_index].adv_selection_ticks = adv;
+                }
             }
         }
+        pending_maker_adv.clear();
+    }
+
+    if (order_manager.has_error()) {
+        utils::error("[FATAL][orders] " + order_manager.error_message());
+        return 1;
     }
 
     std::stringstream summary;
@@ -593,13 +1157,47 @@ int main(int argc, char **argv) {
         std::isfinite(identity_lhs) && std::isfinite(net_total) && std::abs(identity_lhs - net_total) <= 1e-6;
     const double max_dd = pnl.max_drawdown();
     const double fill_rate = pnl.fill_rate();
+    const double maker_fill_rate = pnl.maker_fill_rate();
+    auto mean_vec = [](const std::vector<double> &v) -> double {
+        if (v.empty()) {
+            return 0.0;
+        }
+        double s = 0.0;
+        for (double x : v) {
+            s += x;
+        }
+        return s / static_cast<double>(v.size());
+    };
+    const double maker_queue_avg = mean_vec(pnl.maker_queue_times_ms);
+    const double maker_queue_p90 = percentile(pnl.maker_queue_times_ms, 90.0);
+    const double maker_adv_mean = mean_vec(pnl.maker_adv_ticks);
+    const double maker_adv_p90 = percentile(pnl.maker_adv_ticks, 90.0);
+    const std::size_t maker_adv_count = pnl.maker_adv_ticks.size();
+    const double lat_p50 = percentile(pnl.latency_samples_ms, 50.0);
+    const double lat_p90 = percentile(pnl.latency_samples_ms, 90.0);
+    const double lat_p99 = percentile(pnl.latency_samples_ms, 99.0);
+    const std::size_t lat_n = pnl.latency_samples_ms.size();
+    const double trade_skew_p50 = percentile(pnl.trade_skews_ms, 50.0);
+    const double trade_skew_p90 = percentile(pnl.trade_skews_ms, 90.0);
+    const double trade_skew_p99 = percentile(pnl.trade_skews_ms, 99.0);
+    const std::size_t trade_skew_n = pnl.trade_skews_ms.size();
 
     if (!write_fills_csv(fills_path, fill_rows)) {
         utils::error("Failed to write fills CSV to " + fills_path.string());
         return 1;
     }
+    if (!write_latency_samples_csv(latency_samples_path, pnl.latency_samples_ms)) {
+        utils::warn("Failed to write latency samples to " + latency_samples_path.string());
+    }
+    const auto &ord_metrics = order_manager.metrics();
+    const double avg_lifetime_ms =
+        (ord_metrics.lifetime_samples > 0) ? (ord_metrics.total_lifetime_ms / ord_metrics.lifetime_samples) : 0.0;
+
     if (!write_metrics_json(metrics_path, run_id, pnl, realized, unrealized, net_total, s1, s10, max_dd, fill_rate,
-                            pnl.reject_counts, identity_ok)) {
+                            maker_fill_rate, maker_queue_avg, maker_queue_p90, maker_adv_mean, maker_adv_p90,
+                            pnl.reject_counts, identity_ok, rules_cfg, fee_cfg, ord_metrics, avg_lifetime_ms, latency_cfg,
+                            lat_p50, lat_p90, lat_p99, lat_n, trade_skew_p50, trade_skew_p90, trade_skew_p99,
+                            trade_skew_n, maker_adv_count)) {
         utils::error("Failed to write metrics JSON to " + metrics_path.string());
         return 1;
     }

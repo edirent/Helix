@@ -28,7 +28,9 @@ int main() {
     {
         MatchingEngine matcher("SIM", tick, /*reject_on_insufficient_depth=*/false);
         OrderbookSnapshot book = make_book(99.0, 0.5, 101.0, 0.5);
-        Action buy{Side::Buy, 2.0};
+        Action buy;
+        buy.side = Side::Buy;
+        buy.size = 2.0;
         auto fill = matcher.simulate(buy, book);
         assert(fill.status == FillStatus::Filled);
         assert(std::abs(fill.filled_qty - 0.5) < 1e-9);
@@ -40,7 +42,9 @@ int main() {
     {
         MatchingEngine matcher("SIM", tick, /*reject_on_insufficient_depth=*/true);
         OrderbookSnapshot book = make_book(99.0, 0.5, 101.0, 0.5);
-        Action buy{Side::Buy, 2.0};
+        Action buy;
+        buy.side = Side::Buy;
+        buy.size = 2.0;
         auto fill = matcher.simulate(buy, book);
         assert(fill.status == FillStatus::Rejected);
         assert(fill.reason == RejectReason::NoLiquidity);
@@ -51,7 +55,9 @@ int main() {
     {
         MatchingEngine matcher("SIM", tick, false);
         OrderbookSnapshot book = make_book(99.0, 1.0, 0.0, 0.0);
-        Action buy{Side::Buy, 1.0};
+        Action buy;
+        buy.side = Side::Buy;
+        buy.size = 1.0;
         auto fill = matcher.simulate(buy, book);
         assert(fill.status == FillStatus::Rejected);
         assert(fill.reason == RejectReason::NoAsk);
@@ -61,7 +67,9 @@ int main() {
     {
         MatchingEngine matcher("SIM", tick, false);
         OrderbookSnapshot book = make_book(0.0, 0.0, 101.0, 1.0);
-        Action sell{Side::Sell, 1.0};
+        Action sell;
+        sell.side = Side::Sell;
+        sell.size = 1.0;
         auto fill = matcher.simulate(sell, book);
         assert(fill.status == FillStatus::Rejected);
         assert(fill.reason == RejectReason::NoBid);
@@ -72,7 +80,9 @@ int main() {
         MatchingEngine matcher("SIM", tick, false);
         OrderbookSnapshot book = make_book(99.0, 1.0, 101.0, 1.0);
         const double tiny = 1e-9;
-        Action buy{Side::Buy, tiny};
+        Action buy;
+        buy.side = Side::Buy;
+        buy.size = tiny;
         auto fill = matcher.simulate(buy, book);
         assert(fill.status == FillStatus::Filled);
         assert(std::abs(fill.filled_qty - tiny) < 1e-12);

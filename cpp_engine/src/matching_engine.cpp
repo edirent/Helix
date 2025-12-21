@@ -41,6 +41,7 @@ double best_price_for_side(const OrderbookSnapshot &book, Side side) {
 
 Fill MatchingEngine::simulate(const Action &action, const OrderbookSnapshot &book) const {
     Fill fill;
+    fill.order_id = action.order_id;
     fill.side = action.side;
     fill.status = FillStatus::Rejected;
 

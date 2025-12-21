@@ -14,7 +14,9 @@ int main() {
     book.best_bid = 99.0;
     book.bid_size = 1.0;
 
-    helix::engine::Action buy{helix::engine::Side::Buy, 2.5};
+    helix::engine::Action buy;
+    buy.side = helix::engine::Side::Buy;
+    buy.size = 2.5;
     auto fill = matcher.simulate(buy, book);
 
     assert(fill.status == helix::engine::FillStatus::Filled);

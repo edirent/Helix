@@ -5,12 +5,12 @@
 
 namespace helix::engine {
 
-MakerQueueSim::MakerQueueSim(MakerParams params, double tick_size)
-    : params_(params), tick_size_(tick_size) {}
+MakerQueueSim::MakerQueueSim(MakerParams params, double tick_size) : params_(params), tick_size_(tick_size) {}
 
 void MakerQueueSim::submit(const engine::Action &action, const engine::OrderbookSnapshot &book, int64_t now_ts) {
     RestingOrder ord;
     ord.action = action;
+    ord.order_id = action.order_id;
     ord.price = (action.limit_price > 0.0) ? action.limit_price
                                            : (action.side == engine::Side::Buy ? book.best_bid : book.best_ask);
     ord.my_qty = action.size;
@@ -20,13 +20,62 @@ void MakerQueueSim::submit(const engine::Action &action, const engine::Orderbook
     orders_.push_back(ord);
 }
 
-std::vector<engine::Fill> MakerQueueSim::on_book(const engine::OrderbookSnapshot &book, int64_t now_ts) {
+bool MakerQueueSim::cancel(uint64_t order_id) {
+    auto it = std::remove_if(orders_.begin(), orders_.end(),
+                             [&](const RestingOrder &o) { return o.order_id == order_id; });
+    if (it == orders_.end()) {
+        return false;
+    }
+    orders_.erase(it, orders_.end());
+    return true;
+}
+
+std::vector<engine::Fill> MakerQueueSim::on_book(const engine::OrderbookSnapshot &book, int64_t now_ts,
+                                                 const std::vector<engine::TradePrint> &trades) {
     std::vector<engine::Fill> fills;
     update_level_maps(book);
 
     std::vector<RestingOrder> remaining;
     remaining.reserve(orders_.size());
     for (auto &ord : orders_) {
+        // First consume trade prints at this level (aggressor hits resting maker)
+        for (const auto &tp : trades) {
+            bool hits = false;
+            if (ord.action.side == engine::Side::Buy && tp.side == engine::Side::Sell &&
+                tp.price <= ord.price + tick_size_ + 1e-9) {
+                hits = true;
+            } else if (ord.action.side == engine::Side::Sell && tp.side == engine::Side::Buy &&
+                       tp.price >= ord.price - tick_size_ - 1e-9) {
+                hits = true;
+            }
+            if (!hits || ord.my_qty <= 0.0) {
+                continue;
+            }
+            double remaining_trade = tp.size;
+            const double burn = std::min(ord.queue_ahead, remaining_trade);
+            ord.queue_ahead -= burn;
+            remaining_trade -= burn;
+            const double fill_qty = std::min(ord.my_qty, remaining_trade);
+            ord.my_qty -= fill_qty;
+            if (fill_qty > 0.0) {
+                engine::Fill f =
+                    engine::Fill::filled(ord.action.side, ord.price, fill_qty, ord.my_qty > 0.0, engine::Liquidity::Maker);
+                f.order_id = ord.order_id;
+                const double penalty = params_.adv_ticks * tick_size_;
+                if (ord.action.side == engine::Side::Buy) {
+                    f.price += penalty;
+                    f.vwap_price += penalty;
+                } else {
+                    f.price -= penalty;
+                    f.vwap_price -= penalty;
+                }
+                f.unfilled_qty = ord.my_qty;
+                f.levels_crossed = 1;
+                f.slippage_ticks = 0.0;
+                fills.push_back(f);
+            }
+        }
+
         const double prev_qty = last_level_qty(ord.price, ord.action.side);
         const double curr_qty = current_level_qty(ord.price, ord.action.side);
         const double delta_down = std::max(0.0, prev_qty - curr_qty);
@@ -40,6 +89,7 @@ std::vector<engine::Fill> MakerQueueSim::on_book(const engine::OrderbookSnapshot
             if (fill_qty > 0.0) {
                 engine::Fill f = engine::Fill::filled(ord.action.side, ord.price, fill_qty,
                                                       ord.my_qty > 0.0, engine::Liquidity::Maker);
+                f.order_id = ord.order_id;
                 const double penalty = params_.adv_ticks * tick_size_;
                 if (ord.action.side == engine::Side::Buy) {
                     f.price += penalty;

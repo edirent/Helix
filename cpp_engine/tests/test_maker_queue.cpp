@@ -33,11 +33,12 @@ int main() {
     buy.is_maker = true;
     auto b0 = mk_book(100.0, 10.0, 101.0, 10.0);
     sim.submit(buy, b0, /*now*/0);
+    std::vector<TradePrint> no_trades;
 
     double prev_qty = b0.bid_size;
 
     // Baseline update (no drop) => no fills.
-    auto fills = sim.on_book(b0, 1);
+    auto fills = sim.on_book(b0, 1, no_trades);
     double new_qty = b0.bid_size;
     double delta_visible = std::max(0.0, prev_qty - new_qty);
     assert(delta_visible == 0.0);
@@ -46,7 +47,7 @@ int main() {
 
     // Depth decreases by 2, fill should be bounded by visible drop.
     auto b_drop = mk_book(100.0, 8.0, 101.0, 10.0);
-    fills = sim.on_book(b_drop, 2);
+    fills = sim.on_book(b_drop, 2, no_trades);
     new_qty = b_drop.bid_size;
     delta_visible = std::max(0.0, prev_qty - new_qty);
     if (!fills.empty()) {
@@ -59,7 +60,7 @@ int main() {
     prev_qty = new_qty;
 
     // Expire and ensure no further fills even if depth drops.
-    fills = sim.on_book(mk_book(100.0, 8.0, 101.0, 10.0), 60);
+    fills = sim.on_book(mk_book(100.0, 8.0, 101.0, 10.0), 60, no_trades);
     assert(fills.empty());
 
     // New SELL order to test sell path and adv tick sign.
@@ -71,7 +72,7 @@ int main() {
     sell.is_maker = true;
     auto b1 = mk_book(99.0, 10.0, 101.0, 10.0);
     sim2.submit(sell, b1, 0);
-    fills = sim2.on_book(mk_book(99.0, 10.0, 101.0, 9.0), 1);  // qty down by 1
+    fills = sim2.on_book(mk_book(99.0, 10.0, 101.0, 9.0), 1, no_trades);  // qty down by 1
     if (!fills.empty()) {
         auto f2 = fills.front();
         assert(f2.liquidity == Liquidity::Maker);
@@ -80,7 +81,7 @@ int main() {
     }
 
     // If visible qty only increases, no maker fills.
-    fills = sim2.on_book(mk_book(99.0, 10.0, 101.0, 20.0), 2);
+    fills = sim2.on_book(mk_book(99.0, 10.0, 101.0, 20.0), 2, no_trades);
     assert(fills.empty());
 
     return 0;

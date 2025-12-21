@@ -16,6 +16,7 @@ struct MakerParams {
 
 struct RestingOrder {
     engine::Action action;
+    uint64_t order_id{0};
     double price{0.0};
     double queue_ahead{0.0};
     double my_qty{0.0};
@@ -28,7 +29,9 @@ class MakerQueueSim {
     MakerQueueSim(MakerParams params, double tick_size);
 
     void submit(const engine::Action &action, const engine::OrderbookSnapshot &book, int64_t now_ts);
-    std::vector<engine::Fill> on_book(const engine::OrderbookSnapshot &book, int64_t now_ts);
+    std::vector<engine::Fill> on_book(const engine::OrderbookSnapshot &book, int64_t now_ts,
+                                      const std::vector<engine::TradePrint> &trades);
+    bool cancel(uint64_t order_id);
 
   private:
     double level_qty(const engine::OrderbookSnapshot &book, double price, engine::Side side) const;
