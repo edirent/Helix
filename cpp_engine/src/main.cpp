@@ -15,6 +15,7 @@
 #include <unordered_set>
 #include <iomanip>
 #include <optional>
+#include <limits>
 
 #include "engine/fee_model.hpp"
 #include "engine/decision_engine.hpp"
@@ -196,6 +197,8 @@ std::string reason_str(engine::RejectReason r) {
             return "BadSide";
         case engine::RejectReason::ZeroQty:
             return "ZeroQty";
+        case engine::RejectReason::ZeroAfterRounding:
+            return "ZeroAfterRounding";
         case engine::RejectReason::NoBid:
             return "NoBid";
         case engine::RejectReason::NoAsk:
@@ -601,7 +604,7 @@ int main(int argc, char **argv) {
     engine::RulesEngine rules(rules_cfg);
     engine::FeeModel fee_model(fee_cfg);
 
-    engine::EventBus bus(64);
+    engine::EventBus bus(200000);
     engine::TickReplay replay;
     replay.load_file(replay_source);
     if (trades_path.empty()) {
@@ -869,6 +872,16 @@ int main(int argc, char **argv) {
         }
         if (!no_actions) {
             for (auto &fill : maker_sim.on_book(replay.current_book(), now_ts, trades)) {
+                auto ord_it = order_manager.orders().find(fill.order_id);
+                if (ord_it == order_manager.orders().end() ||
+                    ord_it->second.status == engine::OrderStatus::Cancelled ||
+                    ord_it->second.status == engine::OrderStatus::Expired ||
+                    ord_it->second.status == engine::OrderStatus::Replaced ||
+                    ord_it->second.status == engine::OrderStatus::Filled ||
+                    ord_it->second.status == engine::OrderStatus::Rejected) {
+                    maker_sim.cancel(fill.order_id);
+                    continue;
+                }
                 if (fill.status == engine::FillStatus::Filled) {
                     handle_fill(fill, false, false, 0.0, "MAKER", maker_params.adv_ticks);
                     order_manager.apply_fill(fill, now_ts);
@@ -1097,6 +1110,17 @@ int main(int argc, char **argv) {
                 continue;
             }
             action = rules_res.normalized;
+            if (demo_mode || maker_demo) {
+                std::stringstream dbg;
+                dbg << "[demo_normalized] side=" << side_str(action.side) << " qty=" << action.size
+                    << " px=" << action.limit_price;
+                utils::info(dbg.str());
+            }
+            if (action.size <= 0.0) {
+                auto rej = engine::Fill::rejected(action.side, engine::RejectReason::ZeroAfterRounding);
+                handle_reject(rej, issued_demo, action.notional, issued_demo ? "DEMO" : "STRAT");
+                continue;
+            }
             const double ref_price =
                 (action.side == engine::Side::Buy) ? replay.current_book().best_ask : replay.current_book().best_bid;
             const double last_px = (ref_price > 0.0) ? ref_price : action.limit_price;
@@ -1182,6 +1206,31 @@ int main(int argc, char **argv) {
                 close_order_tracking(pending.order_id);
             }
             pending_order_ids.erase(pending.order_id);
+        }
+    }
+
+    const auto remaining_trades = replay.drain_trades_up_to(std::numeric_limits<int64_t>::max());
+    const int64_t final_ts_for_skew = replay.current_book().ts_ms;
+    for (const auto &tp : remaining_trades) {
+        const int64_t ref_ts = (final_ts_for_skew > 0) ? final_ts_for_skew : tp.ts_ms;
+        pnl.trade_skews_ms.push_back(static_cast<double>(ref_ts - tp.ts_ms));
+    }
+
+    if (!pending_maker_adv.empty()) {
+        const double final_mid =
+            (replay.current_book().best_bid > 0.0 && replay.current_book().best_ask > 0.0)
+                ? (replay.current_book().best_bid + replay.current_book().best_ask) / 2.0
+                : tape.last_price;
+        if (final_mid > 0.0) {
+            for (const auto &p : pending_maker_adv) {
+                const double delta_mid = final_mid - p.mid_at_fill;
+                const double adv = (p.side == engine::Side::Buy ? delta_mid : -delta_mid) / tick_size;
+                pnl.maker_adv_ticks.push_back(adv);
+                if (p.fill_row_index < fill_rows.size()) {
+                    fill_rows[p.fill_row_index].adv_selection_ticks = adv;
+                }
+            }
+            pending_maker_adv.clear();
         }
     }
 

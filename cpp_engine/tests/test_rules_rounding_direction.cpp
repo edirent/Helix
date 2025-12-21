@@ -21,8 +21,8 @@ int main() {
     buy.size = 1.019;          // should floor to 1.01
     auto r = rules.apply(buy, book);
     assert(r.ok);
-    assert(r.normalized.limit_price == 100.1);
-    assert(r.normalized.size == 1.01);
+    assert(std::abs(r.normalized.limit_price - 100.1) < 1e-9);
+    assert(std::abs(r.normalized.size - 1.01) < 1e-9);
 
     helix::engine::Action sell{};
     sell.side = helix::engine::Side::Sell;
@@ -30,8 +30,8 @@ int main() {
     sell.size = 2.237;
     r = rules.apply(sell, book);
     assert(r.ok);
-    assert(r.normalized.limit_price == 100.1);
-    assert(r.normalized.size == 2.23);
+    assert(std::abs(r.normalized.limit_price - 100.1) < 1e-9);
+    assert(std::abs(r.normalized.size - 2.23) < 1e-9);
 
     return 0;
 }

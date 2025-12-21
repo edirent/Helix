@@ -19,7 +19,7 @@ int main() {
     a.side = helix::engine::Side::Buy;
     a.size = 0.0005;
     auto r = rules.apply(a, book);
-    assert(!r.ok && r.reason == helix::engine::RejectReason::MinNotional);
+    assert(!r.ok && r.reason == helix::engine::RejectReason::MinQty);
 
     a.size = 0.0013;
     r = rules.apply(a, book);

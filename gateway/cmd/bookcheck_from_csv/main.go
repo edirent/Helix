@@ -33,6 +33,7 @@ type bookState struct {
 	bestAsk            float64
 	bidSize            float64
 	askSize            float64
+	lastWrittenSeq     int64
 }
 
 func newState() *bookState {
@@ -184,12 +185,18 @@ func (s *bookState) apply(d delta, every int, outWriter *csv.Writer) error {
 			delete(s.asks, k)
 		}
 		s.snapshotInProgress = true
-	} else {
-		if s.lastSeq >= 0 && d.prevSeq != s.lastSeq {
-			return fmt.Errorf("seq gap: prev=%d next_prev=%d", s.lastSeq, d.prevSeq)
-		}
-		if s.lastSeq >= 0 && d.seq <= s.lastSeq {
-			return fmt.Errorf("seq rollback: prev=%d next_seq=%d", s.lastSeq, d.seq)
+	}
+
+	if s.lastSeq >= 0 {
+		if d.seq == s.lastSeq {
+			// multiple deltas sharing the same seq are allowed
+		} else {
+			if d.prevSeq != s.lastSeq {
+				return fmt.Errorf("seq gap: prev=%d next_prev=%d", s.lastSeq, d.prevSeq)
+			}
+			if d.seq <= s.lastSeq {
+				return fmt.Errorf("seq rollback: prev=%d next_seq=%d", s.lastSeq, d.seq)
+			}
 		}
 	}
 
@@ -237,6 +244,13 @@ func (s *bookState) apply(d delta, every int, outWriter *csv.Writer) error {
 		}
 	}
 
+	return nil
+}
+
+func (s *bookState) emit(every int, outWriter *csv.Writer) error {
+	if s.snapshotInProgress || s.lastSeq < 0 {
+		return nil
+	}
 	s.counter++
 	if every > 0 && (s.counter%every) == 0 && outWriter != nil {
 		record := []string{
@@ -251,7 +265,6 @@ func (s *bookState) apply(d delta, every int, outWriter *csv.Writer) error {
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -344,10 +357,22 @@ func main() {
 		if skip {
 			continue
 		}
+		if state.lastSeq >= 0 && d.seq != state.lastSeq {
+			if err := state.emit(*every, writer); err != nil {
+				fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		if err := state.apply(d, *every, writer); err != nil {
 			fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 			os.Exit(1)
 		}
+	}
+
+	if err := state.emit(*every, writer); err != nil {
+		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+		os.Exit(1)
 	}
 
 	writer.Flush()

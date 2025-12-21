@@ -109,19 +109,35 @@ add_executable(test_adv_selection tests/test_adv_selection.cpp)
 target_link_libraries(test_adv_selection PRIVATE helix_engine)
 add_test(NAME test_adv_selection COMMAND test_adv_selection)
 
+add_executable(test_terminal_order_never_fills tests/test_terminal_order_never_fills.cpp)
+target_link_libraries(test_terminal_order_never_fills PRIVATE helix_engine)
+add_test(NAME test_terminal_order_never_fills COMMAND test_terminal_order_never_fills)
+
 add_executable(test_order_lifecycle tests/test_order_lifecycle.cpp)
 target_link_libraries(test_order_lifecycle PRIVATE helix_engine)
 add_test(NAME test_order_lifecycle COMMAND test_order_lifecycle)
 
-set(BYBIT_REPLAY ${CMAKE_CURRENT_SOURCE_DIR}/../data/replay/bybit_l2.csv)
+set(PROJECT_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+add_test(NAME gate9_check_maker
+         COMMAND bash -lc
+         "${CMAKE_BINARY_DIR}/helix_engine_main ${PROJECT_ROOT}/data/replay/btc_l2_mini.csv --trades ${PROJECT_ROOT}/data/replay/btc_trades_mini.csv --latency_fit ${PROJECT_ROOT}/config/latency_fit.json --rules_config ${PROJECT_ROOT}/config/venue_rules.yaml --venue BYBIT --symbol BTCUSDT --run_id gate9_check_maker --demo_only --maker_demo --maker_notional 200 --maker_interval_ms 5 --maker_max 2000 --maker_ttl_ms 2000 --adv_horizon_ms 100 --adv_fatal_missing 1 >/dev/null && python ${PROJECT_ROOT}/scripts/gate9_check.py --metrics runs/gate9_check_maker/metrics.json --trades ${PROJECT_ROOT}/data/replay/btc_trades_mini.csv --mode maker"
+         WORKING_DIRECTORY ${PROJECT_ROOT})
+
+add_test(NAME gate9_check_taker
+         COMMAND bash -lc
+         "${CMAKE_BINARY_DIR}/helix_engine_main ${PROJECT_ROOT}/data/replay/btc_l2_mini.csv --trades ${PROJECT_ROOT}/data/replay/btc_trades_mini.csv --latency_fit ${PROJECT_ROOT}/config/latency_fit.json --rules_config ${PROJECT_ROOT}/config/venue_rules.yaml --venue BYBIT --symbol BTCUSDT --run_id gate9_check_taker --demo_only --demo_notional 200 --demo_interval_ms 5 --demo_max 4000 --adv_fatal_missing 0 >/dev/null && python ${PROJECT_ROOT}/scripts/gate9_check.py --metrics runs/gate9_check_taker/metrics.json --trades ${PROJECT_ROOT}/data/replay/btc_trades_mini.csv --mode taker"
+         WORKING_DIRECTORY ${PROJECT_ROOT})
+
+set(BYBIT_REPLAY ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/bookcheck_sample.csv)
 set(REPLAY_BOOKCHECK ${CMAKE_CURRENT_BINARY_DIR}/replay_bookcheck.csv)
 set(GO_BOOKCHECK ${CMAKE_CURRENT_BINARY_DIR}/go_bookcheck.csv)
 
 add_test(NAME bookcheck_cpp
-         COMMAND helix_engine_main ${BYBIT_REPLAY} --no_actions --bookcheck ${REPLAY_BOOKCHECK} --bookcheck_every 100)
+         COMMAND helix_engine_main ${BYBIT_REPLAY} --no_actions --bookcheck ${REPLAY_BOOKCHECK} --bookcheck_every 1)
 
 add_test(NAME bookcheck_go
-         COMMAND go run ./cmd/bookcheck_from_csv --in ${BYBIT_REPLAY} --out ${GO_BOOKCHECK} --every 100)
+         COMMAND go run ./cmd/bookcheck_from_csv --in ${BYBIT_REPLAY} --out ${GO_BOOKCHECK} --every 1)
 set_tests_properties(bookcheck_go PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../gateway)
 
 add_test(NAME test_bookcheck_diff

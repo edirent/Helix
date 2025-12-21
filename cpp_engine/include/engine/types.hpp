@@ -80,7 +80,8 @@ enum class RejectReason : uint8_t {
     MinQty,
     MinNotional,
     PriceInvalid,
-    RiskLimit
+    RiskLimit,
+    ZeroAfterRounding
 };
 
 struct Fill {

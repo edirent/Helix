@@ -38,6 +38,9 @@ std::vector<engine::Fill> MakerQueueSim::on_book(const engine::OrderbookSnapshot
     std::vector<RestingOrder> remaining;
     remaining.reserve(orders_.size());
     for (auto &ord : orders_) {
+        if (now_ts >= ord.expire_ts || ord.my_qty <= 0.0) {
+            continue;  // expired or empty orders never fill
+        }
         // First consume trade prints at this level (aggressor hits resting maker)
         for (const auto &tp : trades) {
             bool hits = false;
@@ -105,9 +108,6 @@ std::vector<engine::Fill> MakerQueueSim::on_book(const engine::OrderbookSnapshot
             }
         }
 
-        if (ord.my_qty > 0.0 && now_ts >= ord.expire_ts) {
-            continue;
-        }
         if (ord.my_qty > 0.0) {
             remaining.push_back(ord);
         }
