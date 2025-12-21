@@ -57,6 +57,13 @@ struct PnLAggregate {
     std::vector<double> maker_adv_ticks;
     std::vector<double> latency_samples_ms;
     std::vector<double> trade_skews_ms;
+    std::vector<double> fee_bps_samples;
+    std::vector<double> fee_bps_maker_samples;
+    std::vector<double> fee_bps_taker_samples;
+    std::vector<double> exec_cost_ticks_signed_samples;
+    std::vector<double> exec_cost_ticks_signed_maker_samples;
+    std::vector<double> exec_cost_ticks_signed_taker_samples;
+    std::vector<double> filled_to_target_samples;
     int maker_orders_submitted{0};
     double net() const { return gross - fees; }
     double turnover{0.0};
@@ -134,6 +141,7 @@ struct PendingMakerAdv {
     double fill_vwap{0.0};
     engine::Side side{engine::Side::Hold};
     std::size_t fill_row_index{0};
+    int64_t target_ts_ms{0};
 };
 
 double percentile(const std::vector<double> &values, double pct) {
@@ -143,8 +151,26 @@ double percentile(const std::vector<double> &values, double pct) {
     std::vector<double> sorted = values;
     std::sort(sorted.begin(), sorted.end());
     const double rank = (pct / 100.0) * (static_cast<double>(sorted.size()) - 1.0);
-    const std::size_t idx = static_cast<std::size_t>(std::round(rank));
+    const std::size_t idx = static_cast<std::size_t>(std::ceil(rank));
     return sorted[std::min(idx, sorted.size() - 1)];
+}
+
+double sample_stddev(const std::vector<double> &values) {
+    if (values.size() < 2) {
+        return 0.0;
+    }
+    double mean = 0.0;
+    for (double v : values) {
+        mean += v;
+    }
+    mean /= static_cast<double>(values.size());
+    double var = 0.0;
+    for (double v : values) {
+        const double d = v - mean;
+        var += d * d;
+    }
+    var /= static_cast<double>(values.size() - 1);
+    return std::sqrt(var);
 }
 
 std::string side_str(engine::Side side) {
@@ -383,7 +409,12 @@ bool write_metrics_json(const std::filesystem::path &path, const std::string &ru
                         const engine::OrderMetrics &order_metrics, double avg_lifetime_ms,
                         const engine::LatencyConfig &lat_cfg, double lat_p50, double lat_p90, double lat_p99,
                         std::size_t lat_n, double trade_skew_p50, double trade_skew_p90, double trade_skew_p99,
-                        std::size_t trade_skew_n, std::size_t maker_adv_count) {
+                        std::size_t trade_skew_n, std::size_t maker_adv_count, double fee_bps_p50, double fee_bps_p99,
+                        double exec_cost_p50, double exec_cost_p99, double exec_cost_std, double filled_to_target_p99,
+                        double fee_bps_maker_p50, double fee_bps_maker_p90, double fee_bps_maker_p99,
+                        double fee_bps_taker_p50, double fee_bps_taker_p90, double fee_bps_taker_p99,
+                        double exec_cost_maker_p50, double exec_cost_maker_p99, double exec_cost_maker_std,
+                        double exec_cost_taker_p50, double exec_cost_taker_p99, double exec_cost_taker_std) {
     std::ofstream out(path);
     if (!out.is_open()) {
         return false;
@@ -409,9 +440,23 @@ bool write_metrics_json(const std::filesystem::path &path, const std::string &ru
         << ", \"count\": " << maker_adv_count << "},\n";
     out << "  \"trade_ts_skew_ms\": {\"p50\": " << trade_skew_p50 << ", \"p90\": " << trade_skew_p90
         << ", \"p99\": " << trade_skew_p99 << ", \"n\": " << trade_skew_n << "},\n";
+    out << "  \"fee_bps\": {\"p50\": " << fee_bps_p50 << ", \"p99\": " << fee_bps_p99 << "},\n";
+    out << "  \"fee_bps_maker\": {\"p50\": " << fee_bps_maker_p50 << ", \"p90\": " << fee_bps_maker_p90
+        << ", \"p99\": " << fee_bps_maker_p99 << ", \"n\": " << pnl.maker_fills << "},\n";
+    out << "  \"fee_bps_taker\": {\"p50\": " << fee_bps_taker_p50 << ", \"p90\": " << fee_bps_taker_p90
+        << ", \"p99\": " << fee_bps_taker_p99 << ", \"n\": " << pnl.taker_fills << "},\n";
+    out << "  \"exec_cost_ticks_signed\": {\"p50\": " << exec_cost_p50 << ", \"p99\": " << exec_cost_p99
+        << ", \"std\": " << exec_cost_std << "},\n";
+    out << "  \"exec_cost_ticks_signed_maker\": {\"p50\": " << exec_cost_maker_p50 << ", \"p99\": "
+        << exec_cost_maker_p99 << ", \"std\": " << exec_cost_maker_std << ", \"n\": " << pnl.maker_fills << "},\n";
+    out << "  \"exec_cost_ticks_signed_taker\": {\"p50\": " << exec_cost_taker_p50 << ", \"p99\": "
+        << exec_cost_taker_p99 << ", \"std\": " << exec_cost_taker_std << ", \"n\": " << pnl.taker_fills << "},\n";
+    out << "  \"filled_to_target\": {\"p99\": " << filled_to_target_p99 << "},\n";
     out << "  \"fills_total\": " << pnl.fills_total << ",\n";
     out << "  \"makers\": " << pnl.maker_fills << ",\n";
     out << "  \"takers\": " << pnl.taker_fills << ",\n";
+    out << "  \"n_maker_fills\": " << pnl.maker_fills << ",\n";
+    out << "  \"n_taker_fills\": " << pnl.taker_fills << ",\n";
     out << "  \"rejects_total\": " << pnl.rejects_total << ",\n";
     out << "  \"actions_attempted\": " << pnl.actions_attempted << ",\n";
     out << "  \"reject_counts\": {\n";
@@ -475,6 +520,8 @@ int main(int argc, char **argv) {
     int64_t maker_interval_ms = 500;
     int maker_max_actions = 30;
     int64_t maker_ttl_ms = 200;
+    int64_t adv_horizon_ms = 100;
+    bool adv_fatal_missing = true;
     std::string replay_bookcheck_path;
     std::size_t replay_bookcheck_every = 0;
     std::string run_id_override;
@@ -505,6 +552,11 @@ int main(int argc, char **argv) {
             maker_max_actions = std::stoi(argv[++i]);
         } else if (arg == "--maker_ttl_ms" && i + 1 < argc) {
             maker_ttl_ms = std::stoll(argv[++i]);
+        } else if (arg == "--adv_horizon_ms" && i + 1 < argc) {
+            adv_horizon_ms = std::stoll(argv[++i]);
+        } else if (arg == "--adv_fatal_missing" && i + 1 < argc) {
+            const int flag = std::stoi(argv[++i]);
+            adv_fatal_missing = (flag != 0);
         } else if (arg == "--bookcheck" && i + 1 < argc) {
             replay_bookcheck_path = argv[++i];
         } else if (arg == "--bookcheck_every" && i + 1 < argc) {
@@ -676,6 +728,14 @@ int main(int argc, char **argv) {
         pnl.turnover += std::abs(notional);
         pnl.gross += gross_delta;
         pnl.fees += fee_paid;
+        const double cfg_fee_bps =
+            (fill.liquidity == engine::Liquidity::Maker) ? fee_model.config().maker_bps : fee_model.config().taker_bps;
+        pnl.fee_bps_samples.push_back(cfg_fee_bps);
+        if (fill.liquidity == engine::Liquidity::Maker) {
+            pnl.fee_bps_maker_samples.push_back(cfg_fee_bps);
+        } else {
+            pnl.fee_bps_taker_samples.push_back(cfg_fee_bps);
+        }
         const double net_delta = gross_delta - fee_paid;
         pnl.net_steps.push_back(net_delta);
         const double spread_paid_ticks = (mid > 0.0) ? std::abs(fill.vwap_price - mid) / tick_size : 0.0;
@@ -683,6 +743,15 @@ int main(int argc, char **argv) {
             (mid > 0.0) ? ((fill.side == engine::Side::Buy) ? (fill.vwap_price - mid) / tick_size
                                                             : (mid - fill.vwap_price) / tick_size)
                         : 0.0;
+        pnl.exec_cost_ticks_signed_samples.push_back(exec_cost_ticks_signed);
+        if (fill.liquidity == engine::Liquidity::Maker) {
+            pnl.exec_cost_ticks_signed_maker_samples.push_back(exec_cost_ticks_signed);
+        } else {
+            pnl.exec_cost_ticks_signed_taker_samples.push_back(exec_cost_ticks_signed);
+        }
+        if (target_notional > 0.0 && notional > 0.0) {
+            pnl.filled_to_target_samples.push_back(notional / target_notional);
+        }
         const double mid_to_best_ticks = (mid > 0.0 && best > 0.0) ? (mid - best) / tick_size : 0.0;
         const int64_t bucket_1s = book.ts_ms / 1000;
         const int64_t bucket_10s = book.ts_ms / 10000;
@@ -733,7 +802,8 @@ int main(int argc, char **argv) {
                 pnl.maker_queue_times_ms.push_back(qt);
             }
             if (mid > 0.0) {
-                pending_maker_adv.push_back(PendingMakerAdv{mid, fill.vwap_price, fill.side, row_idx});
+                pending_maker_adv.push_back(
+                    PendingMakerAdv{mid, fill.vwap_price, fill.side, row_idx, book.ts_ms + adv_horizon_ms});
             }
         }
 
@@ -757,15 +827,20 @@ int main(int argc, char **argv) {
                 ? (replay.current_book().best_bid + replay.current_book().best_ask) / 2.0
                 : 0.0;
         if (current_mid > 0.0 && !pending_maker_adv.empty()) {
+            std::vector<PendingMakerAdv> remaining;
             for (const auto &p : pending_maker_adv) {
-                const double delta_mid = current_mid - p.mid_at_fill;
-                const double adv = (p.side == engine::Side::Buy ? delta_mid : -delta_mid) / tick_size;
-                pnl.maker_adv_ticks.push_back(adv);
-                if (p.fill_row_index < fill_rows.size()) {
-                    fill_rows[p.fill_row_index].adv_selection_ticks = adv;
+                if (replay.current_book().ts_ms >= p.target_ts_ms) {
+                    const double delta_mid = current_mid - p.mid_at_fill;
+                    const double adv = (p.side == engine::Side::Buy ? delta_mid : -delta_mid) / tick_size;
+                    pnl.maker_adv_ticks.push_back(adv);
+                    if (p.fill_row_index < fill_rows.size()) {
+                        fill_rows[p.fill_row_index].adv_selection_ticks = adv;
+                    }
+                } else {
+                    remaining.push_back(p);
                 }
             }
-            pending_maker_adv.clear();
+            pending_maker_adv.swap(remaining);
         }
         auto evt = bus.poll();
         if (!evt) {
@@ -1111,21 +1186,13 @@ int main(int argc, char **argv) {
     }
 
     if (!pending_maker_adv.empty()) {
-        const double final_mid =
-            (replay.current_book().best_bid > 0.0 && replay.current_book().best_ask > 0.0)
-                ? (replay.current_book().best_bid + replay.current_book().best_ask) / 2.0
-                : 0.0;
-        if (final_mid > 0.0) {
-            for (const auto &p : pending_maker_adv) {
-                const double delta_mid = final_mid - p.mid_at_fill;
-                const double adv = (p.side == engine::Side::Buy ? delta_mid : -delta_mid) / tick_size;
-                pnl.maker_adv_ticks.push_back(adv);
-                if (p.fill_row_index < fill_rows.size()) {
-                    fill_rows[p.fill_row_index].adv_selection_ticks = adv;
-                }
-            }
+        const std::string msg = "[FATAL] maker adv_selection horizon not reached for " +
+                                std::to_string(pending_maker_adv.size()) + " fills";
+        if (adv_fatal_missing) {
+            utils::error(msg);
+            return 1;
         }
-        pending_maker_adv.clear();
+        utils::warn(msg);
     }
 
     if (order_manager.has_error()) {
@@ -1181,6 +1248,24 @@ int main(int argc, char **argv) {
     const double trade_skew_p90 = percentile(pnl.trade_skews_ms, 90.0);
     const double trade_skew_p99 = percentile(pnl.trade_skews_ms, 99.0);
     const std::size_t trade_skew_n = pnl.trade_skews_ms.size();
+    const double fee_bps_p50 = percentile(pnl.fee_bps_samples, 50.0);
+    const double fee_bps_p99 = percentile(pnl.fee_bps_samples, 99.0);
+    const double fee_bps_maker_p50 = percentile(pnl.fee_bps_maker_samples, 50.0);
+    const double fee_bps_maker_p90 = percentile(pnl.fee_bps_maker_samples, 90.0);
+    const double fee_bps_maker_p99 = percentile(pnl.fee_bps_maker_samples, 99.0);
+    const double fee_bps_taker_p50 = percentile(pnl.fee_bps_taker_samples, 50.0);
+    const double fee_bps_taker_p90 = percentile(pnl.fee_bps_taker_samples, 90.0);
+    const double fee_bps_taker_p99 = percentile(pnl.fee_bps_taker_samples, 99.0);
+    const double exec_cost_p50 = percentile(pnl.exec_cost_ticks_signed_samples, 50.0);
+    const double exec_cost_p99 = percentile(pnl.exec_cost_ticks_signed_samples, 99.0);
+    const double exec_cost_std = sample_stddev(pnl.exec_cost_ticks_signed_samples);
+    const double exec_cost_maker_p50 = percentile(pnl.exec_cost_ticks_signed_maker_samples, 50.0);
+    const double exec_cost_maker_p99 = percentile(pnl.exec_cost_ticks_signed_maker_samples, 99.0);
+    const double exec_cost_maker_std = sample_stddev(pnl.exec_cost_ticks_signed_maker_samples);
+    const double exec_cost_taker_p50 = percentile(pnl.exec_cost_ticks_signed_taker_samples, 50.0);
+    const double exec_cost_taker_p99 = percentile(pnl.exec_cost_ticks_signed_taker_samples, 99.0);
+    const double exec_cost_taker_std = sample_stddev(pnl.exec_cost_ticks_signed_taker_samples);
+    const double filled_to_target_p99 = percentile(pnl.filled_to_target_samples, 99.0);
 
     if (!write_fills_csv(fills_path, fill_rows)) {
         utils::error("Failed to write fills CSV to " + fills_path.string());
@@ -1197,7 +1282,11 @@ int main(int argc, char **argv) {
                             maker_fill_rate, maker_queue_avg, maker_queue_p90, maker_adv_mean, maker_adv_p90,
                             pnl.reject_counts, identity_ok, rules_cfg, fee_cfg, ord_metrics, avg_lifetime_ms, latency_cfg,
                             lat_p50, lat_p90, lat_p99, lat_n, trade_skew_p50, trade_skew_p90, trade_skew_p99,
-                            trade_skew_n, maker_adv_count)) {
+                            trade_skew_n, maker_adv_count, fee_bps_p50, fee_bps_p99, exec_cost_p50, exec_cost_p99,
+                            exec_cost_std, filled_to_target_p99, fee_bps_maker_p50, fee_bps_maker_p90,
+                            fee_bps_maker_p99, fee_bps_taker_p50, fee_bps_taker_p90, fee_bps_taker_p99,
+                            exec_cost_maker_p50, exec_cost_maker_p99, exec_cost_maker_std, exec_cost_taker_p50,
+                            exec_cost_taker_p99, exec_cost_taker_std)) {
         utils::error("Failed to write metrics JSON to " + metrics_path.string());
         return 1;
     }

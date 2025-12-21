@@ -215,6 +215,12 @@ bool TickReplay::feed_next(EventBus &bus) {
         if (!apply_next_delta()) {
             return false;
         }
+        const int64_t seq_now = last_seq_;
+        while (delta_cursor_ < deltas_.size() && deltas_[delta_cursor_].seq == seq_now) {
+            if (!apply_next_delta()) {
+                return false;
+            }
+        }
     } else {
         if (cursor_ >= snapshots_.size()) {
             return false;
@@ -222,9 +228,7 @@ bool TickReplay::feed_next(EventBus &bus) {
         orderbook_ = snapshots_[cursor_++];
     }
 
-    if (!(using_deltas_ && repeat_seq_)) {
-        check_invariants(orderbook_);
-    }
+    check_invariants(orderbook_);
     maybe_write_bookcheck();
 
     std::stringstream ss;
@@ -445,7 +449,6 @@ bool TickReplay::apply_next_delta() {
     const auto &d = deltas_[delta_cursor_++];
 
     const bool implicit_snapshot = (!d.snapshot && d.prev_seq == 0);
-    const bool same_seq = (!d.snapshot && !implicit_snapshot && last_seq_ >= 0 && d.seq == last_seq_);
     if (d.snapshot || implicit_snapshot) {
         bids_.clear();
         asks_.clear();
@@ -469,7 +472,6 @@ bool TickReplay::apply_next_delta() {
     if (d.seq > last_seq_) {
         last_seq_ = d.seq;
     }
-    repeat_seq_ = same_seq;
     if (d.ts_ms > 0) {
         last_ts_ms_ = d.ts_ms;
     } else {

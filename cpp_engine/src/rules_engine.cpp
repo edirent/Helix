@@ -5,14 +5,18 @@
 namespace helix::engine {
 namespace {
 
-bool near_multiple(double value, double step, double &normalized) {
+double floor_to_step(double value, double step) {
     if (step <= 0.0) {
-        normalized = value;
-        return true;
+        return value;
     }
-    const double steps = std::round(value / step);
-    normalized = steps * step;
-    return true;
+    return std::floor(value / step) * step;
+}
+
+double ceil_to_step(double value, double step) {
+    if (step <= 0.0) {
+        return value;
+    }
+    return std::ceil(value / step) * step;
 }
 
 double ref_price_for_action(const Action &action, const OrderbookSnapshot &book) {
@@ -46,7 +50,7 @@ RulesResult RulesEngine::apply(const Action &action, const OrderbookSnapshot &bo
 
     double norm_qty = action.size;
     if (cfg_.qty_step > 0.0) {
-        near_multiple(action.size, cfg_.qty_step, norm_qty);
+        norm_qty = floor_to_step(action.size, cfg_.qty_step);
     }
     if (norm_qty < cfg_.min_qty - 1e-9) {
         res.reason = RejectReason::MinQty;
@@ -55,9 +59,14 @@ RulesResult RulesEngine::apply(const Action &action, const OrderbookSnapshot &bo
 
     double norm_price = action.limit_price;
     if (action.limit_price > 0.0 && cfg_.tick_size > 0.0) {
-        near_multiple(action.limit_price, cfg_.tick_size, norm_price);
+        if (action.side == Side::Buy) {
+            norm_price = floor_to_step(action.limit_price, cfg_.tick_size);
+        } else {
+            norm_price = ceil_to_step(action.limit_price, cfg_.tick_size);
+        }
     } else if (action.is_maker && action.limit_price <= 0.0) {
-        norm_price = (action.side == Side::Buy) ? book.best_bid : book.best_ask;
+        norm_price = (action.side == Side::Buy) ? floor_to_step(book.best_bid, cfg_.tick_size)
+                                                : ceil_to_step(book.best_ask, cfg_.tick_size);
     }
 
     res.normalized.size = norm_qty;

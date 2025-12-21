@@ -62,7 +62,6 @@ class TickReplay {
     int64_t last_seq_{-1};
     int64_t last_ts_ms_{0};
     bool using_deltas_{false};
-    bool repeat_seq_{false};
     std::size_t invariant_checks_{0};
     std::size_t invariant_violations_{0};
     std::map<double, double, std::greater<double>> bids_;

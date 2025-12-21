@@ -93,9 +93,21 @@ add_executable(test_rules_normalization tests/test_rules_normalization.cpp)
 target_link_libraries(test_rules_normalization PRIVATE helix_engine)
 add_test(NAME test_rules_normalization COMMAND test_rules_normalization)
 
+add_executable(test_rules_rounding_direction tests/test_rules_rounding_direction.cpp)
+target_link_libraries(test_rules_rounding_direction PRIVATE helix_engine)
+add_test(NAME test_rules_rounding_direction COMMAND test_rules_rounding_direction)
+
 add_executable(test_fee_exactness_smoke tests/test_fee_exactness_smoke.cpp)
 target_link_libraries(test_fee_exactness_smoke PRIVATE helix_engine)
 add_test(NAME test_fee_exactness_smoke COMMAND test_fee_exactness_smoke)
+
+add_executable(test_fee_split tests/test_fee_split.cpp)
+target_link_libraries(test_fee_split PRIVATE helix_engine)
+add_test(NAME test_fee_split COMMAND test_fee_split)
+
+add_executable(test_adv_selection tests/test_adv_selection.cpp)
+target_link_libraries(test_adv_selection PRIVATE helix_engine)
+add_test(NAME test_adv_selection COMMAND test_adv_selection)
 
 add_executable(test_order_lifecycle tests/test_order_lifecycle.cpp)
 target_link_libraries(test_order_lifecycle PRIVATE helix_engine)

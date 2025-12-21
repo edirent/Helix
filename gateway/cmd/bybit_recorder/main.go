@@ -313,7 +313,6 @@ func readLoop(ctx context.Context, endpoint, topic string, out chan<- csvRow, bc
 			}
 			lastSeq = seq
 
-			msgPrev := prev
 			emit := func(levels [][]string, side string) bool {
 				for _, lvl := range levels {
 					if len(lvl) < 2 {
@@ -337,13 +336,12 @@ func readLoop(ctx context.Context, endpoint, topic string, out chan<- csvRow, bc
 					row := csvRow{
 						tsMs:    ts,
 						seq:     seq,
-						prevSeq: msgPrev,
+						prevSeq: prev,
 						side:    side,
 						price:   lvl[0],
 						size:    lvl[1],
 						rowType: msg.Type,
 					}
-					msgPrev = seq
 					select {
 					case out <- row:
 					case <-ctx.Done():
