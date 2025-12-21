@@ -59,6 +59,8 @@ void TickReplay::load_file(const std::filesystem::path &path) {
     last_seq_ = -1;
     last_ts_ms_ = 0;
     using_deltas_ = false;
+    error_ = false;
+    last_error_.clear();
     bids_.clear();
     asks_.clear();
     deltas_.clear();
@@ -89,6 +91,9 @@ void TickReplay::seed_synthetic_data() {
 }
 
 bool TickReplay::feed_next(EventBus &bus) {
+    if (error_) {
+        return false;
+    }
     if (using_deltas_) {
         if (!apply_next_delta()) {
             return false;
@@ -327,9 +332,12 @@ bool TickReplay::apply_next_delta() {
         snapshot_in_progress_ = true;
     } else {
         if (last_seq_ >= 0 && d.prev_seq != last_seq_) {
-            utils::error("TickReplay detected seq gap: prev=" + std::to_string(last_seq_) +
-                         " next_prev=" + std::to_string(d.prev_seq));
-            return false;
+            return set_error("TickReplay detected seq gap: prev=" + std::to_string(last_seq_) +
+                             " next_prev=" + std::to_string(d.prev_seq));
+        }
+        if (last_seq_ >= 0 && d.seq <= last_seq_) {
+            return set_error("TickReplay detected seq rollback: prev=" + std::to_string(last_seq_) +
+                             " next_seq=" + std::to_string(d.seq));
         }
     }
     last_seq_ = d.seq;
@@ -341,8 +349,7 @@ bool TickReplay::apply_next_delta() {
 
     constexpr double kEps = 1e-9;
     if (d.qty < 0.0) {
-        utils::warn("TickReplay negative qty delta at seq=" + std::to_string(d.seq));
-        return false;
+        return set_error("TickReplay negative qty delta at seq=" + std::to_string(d.seq));
     }
 
     if (d.side == Side::Buy) {
@@ -474,6 +481,12 @@ bool TickReplay::check_invariants(const OrderbookSnapshot &book) {
         std::exit(1);
     }
     return ok;
+}
+
+bool TickReplay::set_error(const std::string &err) {
+    error_ = true;
+    last_error_ = err;
+    return false;
 }
 
 void TickReplay::enable_bookcheck(const std::filesystem::path &path, std::size_t interval) {

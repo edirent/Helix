@@ -77,3 +77,26 @@ add_test(NAME test_exec_cost_identity COMMAND test_exec_cost_identity)
 add_executable(test_deterministic_hash tests/test_deterministic_hash.cpp)
 target_link_libraries(test_deterministic_hash PRIVATE helix_engine)
 add_test(NAME test_deterministic_hash COMMAND test_deterministic_hash)
+
+set(BYBIT_REPLAY ${CMAKE_CURRENT_SOURCE_DIR}/../data/replay/bybit_l2.csv)
+set(REPLAY_BOOKCHECK ${CMAKE_CURRENT_BINARY_DIR}/replay_bookcheck.csv)
+set(GO_BOOKCHECK ${CMAKE_CURRENT_BINARY_DIR}/go_bookcheck.csv)
+
+add_test(NAME bookcheck_cpp
+         COMMAND helix_engine_main ${BYBIT_REPLAY} --no_actions --bookcheck ${REPLAY_BOOKCHECK} --bookcheck_every 100)
+
+add_test(NAME bookcheck_go
+         COMMAND go run ./cmd/bookcheck_from_csv --in ${BYBIT_REPLAY} --out ${GO_BOOKCHECK} --every 100)
+set_tests_properties(bookcheck_go PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../gateway)
+
+add_test(NAME test_bookcheck_diff
+         COMMAND python ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/bookcheck_diff.py ${GO_BOOKCHECK} ${REPLAY_BOOKCHECK})
+set_tests_properties(test_bookcheck_diff PROPERTIES DEPENDS "bookcheck_cpp;bookcheck_go")
+
+add_test(NAME test_replay_rejects_negative_qty
+         COMMAND helix_engine_main ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/bad_negative_qty.csv --no_actions)
+set_tests_properties(test_replay_rejects_negative_qty PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME test_replay_rejects_seq_gap
+         COMMAND helix_engine_main ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/bad_seq_gap.csv --no_actions)
+set_tests_properties(test_replay_rejects_seq_gap PROPERTIES WILL_FAIL TRUE)

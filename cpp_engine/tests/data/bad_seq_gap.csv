@@ -1,0 +1,5 @@
+ts_ms,seq,prev_seq,book_side,price,size,type
+1000,1,0,bid,100,1,snapshot
+1000,1,0,ask,101,1,snapshot
+1001,2,1,bid,100,0.5,delta
+1002,4,1,ask,101,0.5,delta

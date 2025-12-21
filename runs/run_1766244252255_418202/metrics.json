@@ -1,0 +1,22 @@
+{
+  "run_id": "run_1766244252255_418202",
+  "fees": 0.6,
+  "gross": 0,
+  "realized": 0,
+  "unrealized": 0,
+  "net_total": -0.6,
+  "identity_ok": true,
+  "sharpe_1s": {"sharpe": 0, "n": 1, "std": 0},
+  "sharpe_10s": {"sharpe": 0, "n": 1, "std": 0},
+  "max_drawdown": 0.6,
+  "turnover": 1000,
+  "fill_rate": 0.2,
+  "fills_total": 1,
+  "makers": 0,
+  "takers": 1,
+  "rejects_total": 4,
+  "actions_attempted": 5,
+  "reject_counts": {
+    "NoAsk": 4
+  }
+}

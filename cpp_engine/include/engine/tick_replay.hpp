@@ -30,6 +30,10 @@ class TickReplay {
     bool feed_next(EventBus &bus);
     bool finished() const;
     void enable_bookcheck(const std::filesystem::path &path, std::size_t interval = 100);
+    bool has_error() const { return error_; }
+    const std::string &last_error() const { return last_error_; }
+    int64_t current_seq() const { return last_seq_; }
+    int64_t current_ts() const { return orderbook_.ts_ms; }
 
     const OrderbookSnapshot &current_book() const { return orderbook_; }
 
@@ -43,6 +47,7 @@ class TickReplay {
     void rebuild_snapshot_from_maps();
     bool check_invariants(const OrderbookSnapshot &book);
     void maybe_write_bookcheck();
+    bool set_error(const std::string &err);
 
     std::filesystem::path source_;
     std::vector<OrderbookSnapshot> snapshots_;
@@ -62,6 +67,8 @@ class TickReplay {
     std::size_t bookcheck_interval_{0};
     std::size_t bookcheck_counter_{0};
     bool snapshot_in_progress_{false};
+    bool error_{false};
+    std::string last_error_;
 };
 
 }  // namespace helix::engine
