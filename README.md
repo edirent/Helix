@@ -20,19 +20,20 @@ Helix focuses on:
 
 ### End-to-end pipeline (core idea)
 ```mermaid
-graph TD
-    A[L2 Delta CSV (Book)\n+ optional Trades CSV] -->|Inputs| B[C++ Engine]
-    
-    subgraph "C++ Engine"
-        B1[TickReplay -> FeatureEngine -> Decision/Demo -> Rules]
-        B1 -->|Orders| B2[OrderManager\n(lifecycle)]
-        B2 -->|Taker| B3[MatchingEngine]
-        B2 -->|Maker| B4[MakerQueueSim]
-        B3 --> B5[RiskEngine\n(realized/unrealized/fees)]
-        B4 --> B5
-    end
-    
-    B5 --> C[fills.csv + metrics.json]
+flowchart TD
+  A["L2 Delta CSV (Book)<br/>+ optional Trades CSV"] -->|Inputs| B["C++ Engine"]
+
+  subgraph ENG["C++ Engine"]
+    B1["TickReplay → FeatureEngine → Decision/Demo → Rules"]
+    B1 -->|Orders| B2["OrderManager<br/>(lifecycle)"]
+    B2 -->|Taker| B3["MatchingEngine"]
+    B2 -->|Maker| B4["MakerQueueSim"]
+    B3 --> B5["RiskEngine<br/>(realized/unrealized/fees)"]
+    B4 --> B5
+  end
+
+  B5 --> C["fills.csv + metrics.json"]
+
 
 ```
 
