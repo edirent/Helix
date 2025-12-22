@@ -331,9 +331,3 @@ Helix is designed around **gates**. Passing a gate means the engine has a specif
 
 ---
 
-
-```
-
-Would you like me to generate the **Chinese version** of this README as well?
-
-```
